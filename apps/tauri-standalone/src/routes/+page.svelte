@@ -2,6 +2,8 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
+  import { slide, fly, fade } from "svelte/transition";
+  import { cubicOut } from "svelte/easing";
 
   import Bug from "@lucide/svelte/icons/bug";
   import RadioTower from "@lucide/svelte/icons/radio-tower";
@@ -25,6 +27,7 @@
   import Wifi from "@lucide/svelte/icons/wifi";
   import WifiOff from "@lucide/svelte/icons/wifi-off";
   import Pause from "@lucide/svelte/icons/pause";
+  import Search from "@lucide/svelte/icons/search";
 
   type PluginInfo = { name: string; module_uuid: string };
   type HandshakeInfo = {
@@ -59,6 +62,46 @@
   let error = $state<string | null>(null);
   let events = $state<McEvent[]>([]);
   let logElement = $state<HTMLDivElement | null>(null);
+
+  let searchQuery = $state("");
+  let kindFilters = $state<Record<McEvent["kind"], boolean>>({
+    protocol: true,
+    stopped: true,
+    thread: true,
+    print: true,
+    notification: true,
+    stat2: true,
+    profilerCapture: true,
+    schema: true,
+    terminated: true,
+    unknown: true,
+  });
+  let logLevel = $state<"all" | 0 | 1 | 2>("all");
+
+  const kindOrder: McEvent["kind"][] = [
+    "protocol",
+    "stopped",
+    "thread",
+    "print",
+    "notification",
+    "stat2",
+    "profilerCapture",
+    "schema",
+    "terminated",
+    "unknown",
+  ];
+
+  let filteredEvents = $derived.by(() => {
+    const query = searchQuery.trim().toLowerCase();
+    return events.filter((event) => {
+      if (!kindFilters[event.kind]) return false;
+      if (logLevel !== "all" && (event.kind === "print" || event.kind === "notification")) {
+        if (event.logLevel !== logLevel) return false;
+      }
+      if (query && !formatEvent(event).toLowerCase().includes(query)) return false;
+      return true;
+    });
+  });
 
   let status = $derived.by(() => {
     if (connected) {
@@ -126,7 +169,7 @@
   });
 
   $effect(() => {
-    events.length;
+    filteredEvents.length;
     if (logElement) {
       logElement.scrollTop = logElement.scrollHeight;
     }
@@ -207,8 +250,8 @@
     }
   }
 
-  function eventIcon(event: McEvent) {
-    switch (event.kind) {
+  function eventIcon(kind: McEvent["kind"]) {
+    switch (kind) {
       case "protocol":
         return Server;
       case "stopped":
@@ -232,8 +275,8 @@
     }
   }
 
-  function eventColor(event: McEvent): string {
-    switch (event.kind) {
+  function eventColor(kind: McEvent["kind"]): string {
+    switch (kind) {
       case "protocol":
         return "text-indigo-500 dark:text-indigo-400";
       case "stopped":
@@ -272,7 +315,7 @@
 
     <div class="flex-1 space-y-5 overflow-y-auto p-4">
       {#if error}
-        <div class="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
+        <div transition:fade={{ duration: 150 }} class="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
           <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
           <span class="break-words">{error}</span>
         </div>
@@ -347,7 +390,7 @@
         </button>
 
         {#if advancedOpen}
-          <div class="space-y-3 pt-1">
+          <div transition:slide={{ duration: 200, easing: cubicOut }} class="space-y-3 pt-1">
             <label class="block">
               <span class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Target module UUID</span>
               <input
@@ -400,7 +443,7 @@
       </section>
 
       {#if handshake}
-        <section class="space-y-3">
+        <section transition:fly={{ y: -12, duration: 200, easing: cubicOut }} class="space-y-3">
           <div class="flex items-center gap-2">
             <Server class="h-4 w-4 text-indigo-500 dark:text-indigo-400" />
             <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Handshake</h2>
@@ -467,20 +510,66 @@
 
     <div class="flex min-h-0 flex-1 flex-col p-4">
       <section class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-        <div class="flex items-center justify-between border-b border-zinc-200 px-4 py-2.5 dark:border-zinc-800">
-          <div class="flex items-center gap-2">
-            <ScrollText class="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
-            <h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Event Log</h2>
+        <div class="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <div class="flex items-center justify-between">
+            <div class="flex items-center gap-2">
+              <ScrollText class="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+              <h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Event Log</h2>
+            </div>
+            <div class="flex items-center gap-3">
+              <span class="text-xs text-zinc-500 dark:text-zinc-400">{filteredEvents.length} of {events.length} events</span>
+              <button
+                type="button"
+                onclick={clearLog}
+                disabled={events.length === 0}
+                class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+              >
+                <Trash2 class="h-3.5 w-3.5" />
+                Clear
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            onclick={clearLog}
-            disabled={events.length === 0}
-            class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-          >
-            <Trash2 class="h-3.5 w-3.5" />
-            Clear
-          </button>
+
+          <div class="flex flex-col gap-2 sm:flex-row">
+            <div class="relative flex-1">
+              <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500" />
+              <input
+                type="text"
+                bind:value={searchQuery}
+                placeholder="Search events..."
+                class="w-full rounded-md border border-zinc-300 bg-white py-1.5 pl-8 pr-3 text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+              />
+            </div>
+            <div class="flex rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
+              {#each [{ label: "All", value: "all" }, { label: "LOG", value: 0 }, { label: "WARN", value: 1 }, { label: "ERROR", value: 2 }] as level}
+                <button
+                  type="button"
+                  onclick={() => (logLevel = level.value as typeof logLevel)}
+                  class="px-2.5 py-1 text-[10px] font-semibold uppercase transition-colors {logLevel === level.value
+                    ? 'rounded-md bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
+                    : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300'}"
+                >
+                  {level.label}
+                </button>
+              {/each}
+            </div>
+          </div>
+
+          <div class="flex flex-wrap gap-1.5">
+            {#each kindOrder as kind}
+              {@const Icon = eventIcon(kind)}
+              <button
+                type="button"
+                onclick={() => (kindFilters[kind] = !kindFilters[kind])}
+                class="flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-medium uppercase tracking-wide transition-colors {kindFilters[kind]
+                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/30 dark:text-indigo-300'
+                  : 'border-zinc-200 bg-white text-zinc-500 opacity-70 hover:opacity-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500'}"
+              >
+                <Icon class="h-3 w-3 {kindFilters[kind] ? eventColor(kind) : 'text-zinc-400 dark:text-zinc-500'}" />
+                {kind}
+              </button>
+            {/each}
+          </div>
         </div>
 
         <div bind:this={logElement} class="flex-1 overflow-y-auto p-2">
@@ -489,12 +578,17 @@
               <ScrollText class="mb-2 h-8 w-8 opacity-50" />
               <p class="text-sm">No events yet.</p>
             </div>
+          {:else if filteredEvents.length === 0}
+            <div class="flex h-full flex-col items-center justify-center text-zinc-400 dark:text-zinc-600">
+              <Search class="mb-2 h-8 w-8 opacity-50" />
+              <p class="text-sm">No events match the current filter.</p>
+            </div>
           {:else}
             <ul class="space-y-0.5 font-mono text-xs">
-              {#each events as event, i (i)}
-                {@const Icon = eventIcon(event)}
+              {#each filteredEvents as event, i (i)}
+                {@const Icon = eventIcon(event.kind)}
                 <li class="flex items-start gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900">
-                  <Icon class="mt-0.5 h-3.5 w-3.5 shrink-0 {eventColor(event)}" />
+                  <Icon class="mt-0.5 h-3.5 w-3.5 shrink-0 {eventColor(event.kind)}" />
                   <span class="break-all text-zinc-700 dark:text-zinc-300">{formatEvent(event)}</span>
                 </li>
               {/each}
