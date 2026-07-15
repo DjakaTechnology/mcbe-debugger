@@ -1,0 +1,66 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "oneOf": [
+    {
+      "title": "Launch (listen for Minecraft)",
+      "description": "Start the debugger and wait for Minecraft Bedrock client to connect. Run `/script debugger connect` in-game after launching.",
+      "properties": {
+        "request": {
+          "type": "string",
+          "enum": ["launch"],
+          "description": "Always \"launch\"."
+        },
+        "program": {
+          "type": "string",
+          "description": "Path to the script entry file (used for source resolution)."
+        },
+        "host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Local address to listen on."
+        },
+        "port": {
+          "type": "integer",
+          "default": 19144,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Local TCP port to listen on. Minecraft default: 19144."
+        },
+        "stopOnEntry": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": ["request", "program"]
+    },
+    {
+      "title": "Attach (connect to BDS)",
+      "description": "Connect to a Bedrock Dedicated Server that has run `/script debugger listen <port>`.",
+      "properties": {
+        "request": {
+          "type": "string",
+          "enum": ["attach"],
+          "description": "Always \"attach\"."
+        },
+        "host": {
+          "type": "string",
+          "default": "127.0.0.1",
+          "description": "Minecraft server address."
+        },
+        "port": {
+          "type": "integer",
+          "default": 19144,
+          "minimum": 1,
+          "maximum": 65535,
+          "description": "Port the server is listening on."
+        },
+        "stopOnEntry": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": ["request"]
+    }
+  ]
+}
