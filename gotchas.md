@@ -11,3 +11,11 @@ Lessons learned during development. Read at session start.
 **Rule:** When upstream protocols have documented edge cases (wrappers, framing quirks, version-specific shapes, alternate encodings), implement them BEFORE live integration testing. Do not mark them `todo!()` and hope they don't trigger — they will. The research already told us this case exists; treating it as optional was the mistake.
 
 **Apply to:** Any protocol port work. If the source analysis mentions a code path that handles a specific shape, that shape exists in production traffic.
+
+### 2026-07-15 — Test helpers that read from sockets must share codec+buffer state
+
+**Mistake:** The `do_handshake` test helper created a fresh `MessageCodec` + `BytesMut` locally, read the ProtocolResponse, then dropped both on return. When the client immediately sent another frame (Request) right after ProtocolResponse, TCP coalesced both frames into one segment. The helper's `recv_frame` consumed both into `buf`, decoded the first, and the second frame's bytes were still sitting in `buf` when it was dropped. The next `recv_frame` (with a fresh buffer) then blocked forever waiting for bytes that were already consumed. Deadlock → test timeout.
+
+**Rule:** Test helpers that do framed socket reads must take `codec: &mut MessageCodec` and `buf: &mut BytesMut` as parameters (or otherwise share state across all reads in the test). Never drop the buffer between reads — TCP coalesces adjacent frames on localhost, and the codec's state machine can leave residual bytes in the buffer that the next read depends on.
+
+**Apply to:** Any test against a real (or mock) socket using a stateful codec. If the helper "simplifies" by hiding codec/buffer creation inside itself, that's the bug pattern.
