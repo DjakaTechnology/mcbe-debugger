@@ -20,12 +20,34 @@ pub fn parse_debuggee_message(value: serde_json::Value) -> Result<DebuggeeEvent,
             return parse_debuggee_message(inner.clone());
         }
     }
+    let type_name = value.get("type").and_then(|v| v.as_str());
+    if let Some(name) = type_name {
+        if !KNOWN_INCOMING_TYPE_TAGS.contains(&name) {
+            return Ok(DebuggeeEvent::Unknown {
+                type_name: name.to_string(),
+                data: value,
+            });
+        }
+    }
     serde_json::from_value(value).map_err(Into::into)
 }
 
 pub fn encode_debugger_message(event: &DebuggerEvent) -> Result<serde_json::Value, ParseError> {
     serde_json::to_value(event).map_err(Into::into)
 }
+
+const KNOWN_INCOMING_TYPE_TAGS: &[&str] = &[
+    "ProtocolEvent",
+    "StoppedEvent",
+    "ThreadEvent",
+    "PrintEvent",
+    "NotificationEvent",
+    "StatEvent2",
+    "ProfilerCapture",
+    "debuggee-response",
+    "SchemaEvent",
+    "terminated",
+];
 
 pub fn encode_legacy_nested(
     _event: &DebuggerEvent,
@@ -94,5 +116,41 @@ mod tests {
             DebuggeeEvent::Print { message, .. } => assert_eq!(message, "hi"),
             other => panic!("expected Print, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_recognizes_terminated() {
+        let value = serde_json::json!({"type": "terminated", "reason": "user exited"});
+        let event = parse_debuggee_message(value).unwrap();
+        match event {
+            DebuggeeEvent::Terminated { reason } => {
+                assert_eq!(reason.as_deref(), Some("user exited"));
+            }
+            other => panic!("expected Terminated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_falls_back_to_unknown_for_unrecognized_type() {
+        let value = serde_json::json!({
+            "type": "SomeNewEventType",
+            "foo": "bar",
+            "n": 42
+        });
+        let event = parse_debuggee_message(value.clone()).unwrap();
+        match event {
+            DebuggeeEvent::Unknown { type_name, data } => {
+                assert_eq!(type_name, "SomeNewEventType");
+                assert_eq!(data, value);
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_still_errors_for_known_type_with_bad_fields() {
+        let value = serde_json::json!({"type": "StoppedEvent"});
+        let result = parse_debuggee_message(value);
+        assert!(result.is_err());
     }
 }

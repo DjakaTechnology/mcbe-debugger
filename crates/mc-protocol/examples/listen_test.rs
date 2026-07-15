@@ -55,7 +55,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     loop {
         match conn.recv_event().await {
-            Ok(event) => print_event(&event),
+            Ok(event) => {
+                if matches!(event, DebuggeeEvent::Terminated { .. }) {
+                    println!();
+                    println!("=== Session terminated by Minecraft ===");
+                    if let DebuggeeEvent::Terminated { reason: Some(r) } = &event {
+                        println!("Reason: {}", r);
+                    }
+                    break;
+                }
+                print_event(&event);
+            }
             Err(e) => {
                 println!();
                 println!("=== Connection closed: {} ===", e);
@@ -120,6 +130,12 @@ fn print_event(event: &DebuggeeEvent) {
         ),
         DebuggeeEvent::Schema { descriptors } => {
             format!("Schema ({} tabs)", descriptors.len())
+        }
+        DebuggeeEvent::Terminated { reason } => {
+            format!("Terminated (reason={:?})", reason)
+        }
+        DebuggeeEvent::Unknown { type_name, data } => {
+            format!("[UNKNOWN type={}] {}", type_name, data)
         }
     };
     println!("<<< {}", line);

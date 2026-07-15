@@ -60,6 +60,16 @@ pub enum DebuggeeEvent {
     Schema {
         descriptors: Vec<DiagnosticsTabDescriptor>,
     },
+    #[serde(rename = "terminated")]
+    Terminated {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    Unknown {
+        type_name: String,
+        #[serde(skip)]
+        data: serde_json::Value,
+    },
 }
 
 #[cfg(test)]
