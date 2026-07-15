@@ -72,14 +72,22 @@ impl DebuggeeConnection {
                 plugins,
                 require_passcode,
             } => {
-                if version != ProtocolVersion::CURRENT.as_u8() {
+                if version < ProtocolVersion::MIN_SUPPORTED.as_u8()
+                    || version > ProtocolVersion::CURRENT.as_u8()
+                {
                     return Err(ConnectionError::UnsupportedVersion {
                         server: version,
                         client: ProtocolVersion::CURRENT.as_u8(),
                     });
                 }
+                let negotiated = ProtocolVersion::try_from(version).map_err(|_| {
+                    ConnectionError::UnsupportedVersion {
+                        server: version,
+                        client: ProtocolVersion::CURRENT.as_u8(),
+                    }
+                })?;
                 ProtocolHandshake {
-                    version: ProtocolVersion::CURRENT,
+                    version: negotiated,
                     plugins,
                     require_passcode,
                 }
@@ -255,7 +263,7 @@ mod tests {
                 &mut sock,
                 serde_json::json!({
                     "type": "ProtocolEvent",
-                    "version": 7,
+                    "version": 6,
                     "plugins": [],
                     "require_passcode": false
                 }),
@@ -272,8 +280,8 @@ mod tests {
         .expect("connect timed out");
 
         match result {
-            Err(ConnectionError::UnsupportedVersion { server: 7, client: 9 }) => {}
-            other => panic!("expected UnsupportedVersion(7 vs 9), got {other:?}"),
+            Err(ConnectionError::UnsupportedVersion { server: 6, client: 9 }) => {}
+            other => panic!("expected UnsupportedVersion(6 vs 9), got {other:?}"),
         }
 
         let _ = tokio::time::timeout(TEST_TIMEOUT, server).await;
