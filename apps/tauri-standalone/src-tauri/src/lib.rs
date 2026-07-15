@@ -38,6 +38,54 @@ async fn get_handshake_info(
     mc_tauri::get_handshake_info(&state).await
 }
 
+#[tauri::command]
+async fn pause_thread(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    thread_id: u32,
+) -> Result<mc_tauri::ResponsePayload, String> {
+    mc_tauri::pause_thread(&state, thread_id).await
+}
+
+#[tauri::command]
+async fn continue_thread(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    thread_id: u32,
+) -> Result<mc_tauri::ResponsePayload, String> {
+    mc_tauri::continue_thread(&state, thread_id).await
+}
+
+#[tauri::command]
+async fn step_next(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    thread_id: u32,
+) -> Result<mc_tauri::ResponsePayload, String> {
+    mc_tauri::step_next(&state, thread_id).await
+}
+
+#[tauri::command]
+async fn step_in(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    thread_id: u32,
+) -> Result<mc_tauri::ResponsePayload, String> {
+    mc_tauri::step_in(&state, thread_id).await
+}
+
+#[tauri::command]
+async fn step_out(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    thread_id: u32,
+) -> Result<mc_tauri::ResponsePayload, String> {
+    mc_tauri::step_out(&state, thread_id).await
+}
+
+#[tauri::command]
+async fn evaluate(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    expression: String,
+) -> Result<mc_tauri::ResponsePayload, String> {
+    mc_tauri::evaluate(&state, expression).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -49,6 +97,12 @@ pub fn run() {
             connect_to_minecraft,
             disconnect,
             get_handshake_info,
+            pause_thread,
+            continue_thread,
+            step_next,
+            step_in,
+            step_out,
+            evaluate,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

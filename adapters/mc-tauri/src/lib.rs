@@ -1,10 +1,10 @@
 use mc_protocol::{
-    ConnectOptions, DebuggeeConnection, DebuggeeEvent, DebuggerEvent, ProtocolHandshake,
-    ProtocolVersion, DEFAULT_PORT,
+    ConnectOptions, DebuggeeConnection, DebuggeeEvent, DebuggerEvent, DebuggeeResponse,
+    ProtocolHandshake, ProtocolVersion, DEFAULT_PORT,
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AdapterInfo {
@@ -30,6 +30,23 @@ pub struct HandshakeInfo {
     pub version: u8,
     pub plugins: Vec<PluginInfo>,
     pub require_passcode: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResponsePayload {
+    pub success: bool,
+    pub args: Option<serde_json::Value>,
+    pub message: Option<String>,
+}
+
+impl From<DebuggeeResponse> for ResponsePayload {
+    fn from(r: DebuggeeResponse) -> Self {
+        Self {
+            success: r.success,
+            args: r.args,
+            message: r.response_message,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,8 +134,19 @@ impl From<DebuggeeEvent> for McEvent {
     }
 }
 
+type Responder = oneshot::Sender<Result<ResponsePayload, String>>;
+
 enum Command {
     SendEvent(DebuggerEvent),
+    Pause { thread_id: u32, response_tx: Responder },
+    Continue { thread_id: u32, response_tx: Responder },
+    StepNext { thread_id: u32, response_tx: Responder },
+    StepIn { thread_id: u32, response_tx: Responder },
+    StepOut { thread_id: u32, response_tx: Responder },
+    Evaluate {
+        expression: String,
+        response_tx: Responder,
+    },
 }
 
 pub struct AppState {
@@ -185,9 +213,7 @@ async fn spawn_connection(
     let info = handshake_to_info(&hs);
     *state.handshake.lock().await = Some(info.clone());
     let (tx, rx) = mpsc::channel(16);
-    let _ = tx
-        .send(Command::SendEvent(DebuggerEvent::Resume))
-        .await;
+    let _ = tx.send(Command::SendEvent(DebuggerEvent::Resume)).await;
     *state.cmd_tx.lock().await = Some(tx);
     tokio::spawn(connection_task(conn, app, rx));
     info
@@ -201,6 +227,86 @@ pub async fn disconnect(state: &AppState) -> Result<(), String> {
 
 pub async fn get_handshake_info(state: &AppState) -> Result<Option<HandshakeInfo>, String> {
     Ok(state.handshake.lock().await.clone())
+}
+
+pub async fn pause_thread(
+    state: &AppState,
+    thread_id: u32,
+) -> Result<ResponsePayload, String> {
+    send_request(state, |tx| Command::Pause {
+        thread_id,
+        response_tx: tx,
+    })
+    .await
+}
+
+pub async fn continue_thread(
+    state: &AppState,
+    thread_id: u32,
+) -> Result<ResponsePayload, String> {
+    send_request(state, |tx| Command::Continue {
+        thread_id,
+        response_tx: tx,
+    })
+    .await
+}
+
+pub async fn step_next(
+    state: &AppState,
+    thread_id: u32,
+) -> Result<ResponsePayload, String> {
+    send_request(state, |tx| Command::StepNext {
+        thread_id,
+        response_tx: tx,
+    })
+    .await
+}
+
+pub async fn step_in(
+    state: &AppState,
+    thread_id: u32,
+) -> Result<ResponsePayload, String> {
+    send_request(state, |tx| Command::StepIn {
+        thread_id,
+        response_tx: tx,
+    })
+    .await
+}
+
+pub async fn step_out(
+    state: &AppState,
+    thread_id: u32,
+) -> Result<ResponsePayload, String> {
+    send_request(state, |tx| Command::StepOut {
+        thread_id,
+        response_tx: tx,
+    })
+    .await
+}
+
+pub async fn evaluate(
+    state: &AppState,
+    expression: String,
+) -> Result<ResponsePayload, String> {
+    send_request(state, |tx| Command::Evaluate {
+        expression,
+        response_tx: tx,
+    })
+    .await
+}
+
+async fn send_request<F>(state: &AppState, build: F) -> Result<ResponsePayload, String>
+where
+    F: FnOnce(Responder) -> Command,
+{
+    let (tx, rx) = oneshot::channel();
+    let cmd = build(tx);
+    {
+        let guard = state.cmd_tx.lock().await;
+        let sender = guard.as_ref().ok_or("not connected")?;
+        sender.send(cmd).await.map_err(|e| e.to_string())?;
+    }
+    rx.await.map_err(|_| "connection task dropped".to_string())?
 }
 
 async fn connection_task(
@@ -230,6 +336,57 @@ async fn connection_task(
                         let _ = app.emit("mc-disconnected", ());
                         return;
                     }
+                }
+                Some(Command::Pause { thread_id, response_tx }) => {
+                    let result = conn
+                        .pause(thread_id)
+                        .await
+                        .map(ResponsePayload::from)
+                        .map_err(|e| e.to_string());
+                    let _ = response_tx.send(result);
+                }
+                Some(Command::Continue { thread_id, response_tx }) => {
+                    let result = conn
+                        .continue_thread(thread_id)
+                        .await
+                        .map(ResponsePayload::from)
+                        .map_err(|e| e.to_string());
+                    let _ = response_tx.send(result);
+                }
+                Some(Command::StepNext { thread_id, response_tx }) => {
+                    let result = conn
+                        .step_next(thread_id)
+                        .await
+                        .map(ResponsePayload::from)
+                        .map_err(|e| e.to_string());
+                    let _ = response_tx.send(result);
+                }
+                Some(Command::StepIn { thread_id, response_tx }) => {
+                    let result = conn
+                        .step_in(thread_id)
+                        .await
+                        .map(ResponsePayload::from)
+                        .map_err(|e| e.to_string());
+                    let _ = response_tx.send(result);
+                }
+                Some(Command::StepOut { thread_id, response_tx }) => {
+                    let result = conn
+                        .step_out(thread_id)
+                        .await
+                        .map(ResponsePayload::from)
+                        .map_err(|e| e.to_string());
+                    let _ = response_tx.send(result);
+                }
+                Some(Command::Evaluate {
+                    expression,
+                    response_tx,
+                }) => {
+                    let result = conn
+                        .evaluate(&expression)
+                        .await
+                        .map(ResponsePayload::from)
+                        .map_err(|e| e.to_string());
+                    let _ = response_tx.send(result);
                 }
                 None => return,
             },

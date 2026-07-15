@@ -28,6 +28,10 @@
   import WifiOff from "@lucide/svelte/icons/wifi-off";
   import Pause from "@lucide/svelte/icons/pause";
   import Search from "@lucide/svelte/icons/search";
+  import SkipForward from "@lucide/svelte/icons/skip-forward";
+  import CornerDownRight from "@lucide/svelte/icons/corner-down-right";
+  import CornerUpRight from "@lucide/svelte/icons/corner-up-right";
+  import Send from "@lucide/svelte/icons/send";
 
   type PluginInfo = { name: string; module_uuid: string };
   type HandshakeInfo = {
@@ -48,6 +52,12 @@
     | { kind: "terminated"; reason: string | null }
     | { kind: "unknown"; typeName: string };
 
+  type ResponsePayload = {
+    success: boolean;
+    args?: unknown;
+    message?: string;
+  };
+
   let mode = $state<"listen" | "connect">("listen");
   let host = $state("127.0.0.1");
   let port = $state(19144);
@@ -63,6 +73,11 @@
   let events = $state<McEvent[]>([]);
   let logElement = $state<HTMLDivElement | null>(null);
 
+  let stopped = $state(false);
+  let stoppedThreadId = $state<number | null>(null);
+  let stopReason = $state<string>("");
+  let busy = $state(false);
+
   let searchQuery = $state("");
   let kindFilters = $state<Record<McEvent["kind"], boolean>>({
     protocol: true,
@@ -77,6 +92,9 @@
     unknown: true,
   });
   let logLevel = $state<"all" | 0 | 1 | 2>("all");
+
+  let evalExpression = $state("");
+  let evalHistory = $state<{ expression: string; result: ResponsePayload }[]>([]);
 
   const kindOrder: McEvent["kind"][] = [
     "protocol",
@@ -143,16 +161,31 @@
     Promise.all([
       listen<McEvent>("mc-event", (e) => {
         events = [...events, e.payload].slice(-500);
+        if (e.payload.kind === "stopped") {
+          stopped = true;
+          stoppedThreadId = e.payload.thread;
+          stopReason = e.payload.reason;
+        } else if (e.payload.kind === "thread" && e.payload.reason === "exited" && e.payload.thread === stoppedThreadId) {
+          stopped = false;
+          stoppedThreadId = null;
+          stopReason = "";
+        }
       }),
       listen("mc-disconnected", () => {
         disconnected = true;
         connected = false;
         handshake = null;
+        stopped = false;
+        stoppedThreadId = null;
+        stopReason = "";
       }),
       listen("mc-terminated", () => {
         disconnected = true;
         connected = false;
         handshake = null;
+        stopped = false;
+        stoppedThreadId = null;
+        stopReason = "";
       }),
     ]).then((uls) => {
       if (cancelled) {
@@ -213,6 +246,65 @@
     } finally {
       connected = false;
       handshake = null;
+      stopped = false;
+      stoppedThreadId = null;
+      stopReason = "";
+    }
+  }
+
+  async function runDebugCommand(command: string, threadId: number, clearStopped: boolean) {
+    busy = true;
+    error = null;
+    try {
+      const result = await invoke<ResponsePayload>(command, { threadId });
+      if (!result.success) {
+        error = result.message ?? `${command} failed`;
+      } else if (clearStopped) {
+        stopped = false;
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function pauseThread() {
+    await runDebugCommand("pause_thread", stoppedThreadId ?? 0, false);
+  }
+
+  async function resumeThread() {
+    await runDebugCommand("continue_thread", stoppedThreadId!, true);
+  }
+
+  async function stepNext() {
+    await runDebugCommand("step_next", stoppedThreadId!, true);
+  }
+
+  async function stepIn() {
+    await runDebugCommand("step_in", stoppedThreadId!, true);
+  }
+
+  async function stepOut() {
+    await runDebugCommand("step_out", stoppedThreadId!, true);
+  }
+
+  async function handleEvaluate() {
+    const expr = evalExpression.trim();
+    if (!expr) return;
+    busy = true;
+    error = null;
+    try {
+      const result = await invoke<ResponsePayload>("evaluate", { expression: expr });
+      evalHistory = [{ expression: expr, result }, ...evalHistory].slice(0, 10);
+      if (!result.success) {
+        error = result.message ?? "Evaluation failed";
+      }
+    } catch (e) {
+      error = String(e);
+    } finally {
+      busy = false;
+      evalExpression = "";
     }
   }
 
@@ -508,6 +600,67 @@
       </div>
     </header>
 
+    {#if connected}
+      <div class="flex items-center gap-1 border-b border-zinc-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950">
+        {#if stopped}
+          <span class="mr-2 flex items-center gap-1.5 rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
+            <Pause class="h-3.5 w-3.5" />
+            Paused: {stopReason}
+          </span>
+        {/if}
+
+        {#if !stopped && !busy}
+          <button
+            type="button"
+            onclick={pauseThread}
+            class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          >
+            <Pause class="h-4 w-4" />
+            Pause
+          </button>
+        {/if}
+
+        {#if stopped && !busy}
+          <button
+            type="button"
+            onclick={resumeThread}
+            class="flex items-center gap-1.5 rounded-md bg-indigo-600 px-2.5 py-1.5 text-xs font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 dark:bg-indigo-600 dark:hover:bg-indigo-700"
+          >
+            <Play class="h-4 w-4" />
+            Continue
+          </button>
+          <button
+            type="button"
+            onclick={stepNext}
+            class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          >
+            <SkipForward class="h-4 w-4" />
+            Next
+          </button>
+          <button
+            type="button"
+            onclick={stepIn}
+            class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          >
+            <CornerDownRight class="h-4 w-4" />
+            In
+          </button>
+          <button
+            type="button"
+            onclick={stepOut}
+            class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+          >
+            <CornerUpRight class="h-4 w-4" />
+            Out
+          </button>
+        {/if}
+
+        {#if busy}
+          <LoaderCircle class="h-4 w-4 animate-spin text-zinc-500 dark:text-zinc-400" />
+        {/if}
+      </div>
+    {/if}
+
     <div class="flex min-h-0 flex-1 flex-col p-4">
       <section class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
         <div class="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
@@ -597,5 +750,54 @@
         </div>
       </section>
     </div>
+
+    {#if connected && stopped}
+      <div transition:slide={{ duration: 200, easing: cubicOut }} class="border-t border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950">
+        <div class="flex items-start gap-2">
+          <div class="relative flex-1">
+            <Terminal class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500" />
+            <input
+              type="text"
+              bind:value={evalExpression}
+              onkeydown={(e) => e.key === "Enter" && handleEvaluate()}
+              placeholder="Evaluate expression…"
+              disabled={busy}
+              class="w-full rounded-md border border-zinc-300 bg-white py-2 pl-8 pr-3 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+            />
+          </div>
+          <button
+            type="button"
+            onclick={handleEvaluate}
+            disabled={busy || !evalExpression.trim()}
+            class="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-600 disabled:opacity-60 dark:bg-indigo-600 dark:hover:bg-indigo-700"
+          >
+            <Send class="h-4 w-4" />
+            Eval
+          </button>
+        </div>
+
+        {#if evalHistory.length > 0}
+          <div transition:fade={{ duration: 150 }} class="mt-3 space-y-2">
+            {#each evalHistory as item, i (i)}
+              <div class="rounded-md border border-zinc-200 bg-zinc-50 p-2 text-xs dark:border-zinc-800 dark:bg-zinc-900">
+                <div class="mb-1 flex items-center justify-between">
+                  <code class="font-mono font-medium text-zinc-700 dark:text-zinc-300">{item.expression}</code>
+                  {#if item.result.success}
+                    <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">OK</span>
+                  {:else}
+                    <span class="rounded-full bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:bg-rose-950/30 dark:text-rose-300">ERR</span>
+                  {/if}
+                </div>
+                {#if item.result.success}
+                  <pre class="overflow-x-auto rounded bg-white p-1.5 font-mono text-[10px] text-zinc-600 dark:bg-zinc-950 dark:text-zinc-400">{JSON.stringify(item.result.args, null, 2)}</pre>
+                {:else}
+                  <p class="text-rose-600 dark:text-rose-400">{item.result.message ?? "Evaluation failed"}</p>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {/if}
   </main>
 </div>
