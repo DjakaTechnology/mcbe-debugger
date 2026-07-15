@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -25,11 +26,21 @@ pub struct ProtocolHandshake {
     pub require_passcode: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct DebuggeeResponse {
+    pub request_seq: u32,
+    pub args: Option<serde_json::Value>,
+    pub success: bool,
+    pub response_message: Option<String>,
+}
+
 #[derive(Debug)]
 pub struct DebuggeeConnection {
     stream: TcpStream,
     codec: MessageCodec,
     read_buf: BytesMut,
+    event_buffer: VecDeque<DebuggeeEvent>,
+    next_request_seq: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -91,9 +102,11 @@ impl DebuggeeConnection {
             stream,
             codec: MessageCodec::new(),
             read_buf: BytesMut::new(),
+            event_buffer: VecDeque::new(),
+            next_request_seq: 1,
         };
 
-        let first = conn.recv_event().await?;
+        let first = conn.recv_event_inner().await?;
         let (version_num, plugins, require_passcode) = match first {
             DebuggeeEvent::Protocol {
                 version,
@@ -167,6 +180,13 @@ impl DebuggeeConnection {
     }
 
     pub async fn recv_event(&mut self) -> Result<DebuggeeEvent, ConnectionError> {
+        if let Some(event) = self.event_buffer.pop_front() {
+            return Ok(event);
+        }
+        self.recv_event_inner().await
+    }
+
+    async fn recv_event_inner(&mut self) -> Result<DebuggeeEvent, ConnectionError> {
         loop {
             if let Some(value) = self.codec.decode(&mut self.read_buf)? {
                 return parse_debuggee_message(value).map_err(ConnectionError::Parse);
@@ -178,6 +198,122 @@ impl DebuggeeConnection {
             }
             self.read_buf.extend_from_slice(&tmp[..n]);
         }
+    }
+
+    pub async fn request(
+        &mut self,
+        command: impl Into<String>,
+        args: serde_json::Value,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        let seq = self.next_request_seq;
+        self.next_request_seq = self.next_request_seq.checked_add(1).unwrap_or(1);
+
+        self.send_event(&DebuggerEvent::Request {
+            request_seq: seq,
+            command: command.into(),
+            args,
+        })
+        .await?;
+
+        loop {
+            match self.recv_event_inner().await? {
+                DebuggeeEvent::DebuggeeResponse {
+                    request_seq,
+                    args,
+                    success,
+                    response_message,
+                } if request_seq == seq => {
+                    return Ok(DebuggeeResponse {
+                        request_seq,
+                        args,
+                        success: success.unwrap_or(true),
+                        response_message,
+                    });
+                }
+                other => {
+                    self.event_buffer.push_back(other);
+                }
+            }
+        }
+    }
+
+    pub async fn step_next(
+        &mut self,
+        thread_id: u32,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request("next", serde_json::json!({"threadId": thread_id}))
+            .await
+    }
+
+    pub async fn step_in(
+        &mut self,
+        thread_id: u32,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request("stepIn", serde_json::json!({"threadId": thread_id}))
+            .await
+    }
+
+    pub async fn step_out(
+        &mut self,
+        thread_id: u32,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request("stepOut", serde_json::json!({"threadId": thread_id}))
+            .await
+    }
+
+    pub async fn continue_thread(
+        &mut self,
+        thread_id: u32,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request("continue", serde_json::json!({"threadId": thread_id}))
+            .await
+    }
+
+    pub async fn pause(
+        &mut self,
+        thread_id: u32,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request("pause", serde_json::json!({"threadId": thread_id}))
+            .await
+    }
+
+    pub async fn evaluate(
+        &mut self,
+        expression: &str,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request("evaluate", serde_json::json!({"expression": expression}))
+            .await
+    }
+
+    pub async fn stack_trace(
+        &mut self,
+        thread_id: u32,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request("stackTrace", serde_json::json!({"threadId": thread_id}))
+            .await
+    }
+
+    pub async fn scopes(
+        &mut self,
+        frame_id: u32,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request("scopes", serde_json::json!({"frameId": frame_id}))
+            .await
+    }
+
+    pub async fn variables(
+        &mut self,
+        variables_reference: u32,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request(
+            "variables",
+            serde_json::json!({"variablesReference": variables_reference}),
+        )
+        .await
+    }
+
+    pub async fn threads(&mut self) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request("threads", serde_json::json!({})).await
     }
 
     pub fn peer_addr(&self) -> std::io::Result<SocketAddr> {
@@ -219,6 +355,25 @@ mod tests {
             }
             buf.extend_from_slice(&tmp[..n]);
         }
+    }
+
+    async fn server_handshake(
+        sock: &mut TcpStream,
+        codec: &mut MessageCodec,
+        buf: &mut BytesMut,
+        protocol_event: serde_json::Value,
+    ) -> serde_json::Value {
+        send_frame(sock, protocol_event).await;
+        recv_frame(sock, codec, buf).await
+    }
+
+    fn default_protocol_event() -> serde_json::Value {
+        serde_json::json!({
+            "type": "ProtocolEvent",
+            "version": 9,
+            "plugins": [],
+            "require_passcode": false
+        })
     }
 
     #[tokio::test]
@@ -369,10 +524,7 @@ mod tests {
         .await
         .expect("connect timed out");
 
-        assert!(matches!(
-            result,
-            Err(ConnectionError::PasscodeRequired)
-        ));
+        assert!(matches!(result, Err(ConnectionError::PasscodeRequired)));
 
         let _ = tokio::time::timeout(TEST_TIMEOUT, server).await;
     }
@@ -472,20 +624,10 @@ mod tests {
 
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
-            send_frame(
-                &mut sock,
-                serde_json::json!({
-                    "type": "ProtocolEvent",
-                    "version": 9,
-                    "plugins": [],
-                    "require_passcode": false
-                }),
-            )
-            .await;
-
             let mut codec = MessageCodec::new();
             let mut buf = BytesMut::new();
-            let _protocol_response = recv_frame(&mut sock, &mut codec, &mut buf).await;
+            let _protocol_response =
+                server_handshake(&mut sock, &mut codec, &mut buf, default_protocol_event()).await;
 
             send_frame(
                 &mut sock,
@@ -497,8 +639,7 @@ mod tests {
             )
             .await;
 
-            let client_request = recv_frame(&mut sock, &mut codec, &mut buf).await;
-            client_request
+            recv_frame(&mut sock, &mut codec, &mut buf).await
         });
 
         let (mut conn, _handshake) = tokio::time::timeout(
@@ -528,5 +669,185 @@ mod tests {
             .expect("server timed out")
             .expect("server task panicked");
         assert_eq!(server_seen["type"], "resume");
+    }
+
+    #[tokio::test]
+    async fn request_returns_matching_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut codec = MessageCodec::new();
+            let mut buf = BytesMut::new();
+            let _protocol_response =
+                server_handshake(&mut sock, &mut codec, &mut buf, default_protocol_event()).await;
+
+            let request = recv_frame(&mut sock, &mut codec, &mut buf).await;
+            let seq = request["request_seq"].as_u64().unwrap();
+
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "debuggee-response",
+                    "request_seq": seq,
+                    "args": {"result": 42},
+                    "success": true
+                }),
+            )
+            .await;
+
+            request
+        });
+
+        let (mut conn, _) = tokio::time::timeout(
+            TEST_TIMEOUT,
+            DebuggeeConnection::connect("127.0.0.1", port),
+        )
+        .await
+        .expect("connect timed out")
+        .expect("connect failed");
+
+        let response = tokio::time::timeout(TEST_TIMEOUT, conn.evaluate("1+1"))
+            .await
+            .expect("request timed out")
+            .expect("request failed");
+
+        assert!(response.success);
+        assert_eq!(response.args.unwrap()["result"], 42);
+
+        let server_seen_request = tokio::time::timeout(TEST_TIMEOUT, server)
+            .await
+            .expect("server timed out")
+            .expect("server task panicked");
+        assert_eq!(server_seen_request["type"], "request");
+        assert_eq!(server_seen_request["command"], "evaluate");
+        assert_eq!(server_seen_request["args"]["expression"], "1+1");
+    }
+
+    #[tokio::test]
+    async fn request_buffers_interleaved_events() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut codec = MessageCodec::new();
+            let mut buf = BytesMut::new();
+            let _protocol_response =
+                server_handshake(&mut sock, &mut codec, &mut buf, default_protocol_event()).await;
+
+            let request = recv_frame(&mut sock, &mut codec, &mut buf).await;
+            let seq = request["request_seq"].as_u64().unwrap();
+
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "event",
+                    "event": {
+                        "type": "PrintEvent",
+                        "message": "interleaved!",
+                        "logLevel": 0
+                    }
+                }),
+            )
+            .await;
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "debuggee-response",
+                    "request_seq": seq,
+                    "success": true
+                }),
+            )
+            .await;
+        });
+
+        let (mut conn, _) = tokio::time::timeout(
+            TEST_TIMEOUT,
+            DebuggeeConnection::connect("127.0.0.1", port),
+        )
+        .await
+        .expect("connect timed out")
+        .expect("connect failed");
+
+        let response = tokio::time::timeout(TEST_TIMEOUT, conn.threads())
+            .await
+            .expect("request timed out")
+            .expect("request failed");
+        assert!(response.success);
+
+        let buffered = tokio::time::timeout(TEST_TIMEOUT, conn.recv_event())
+            .await
+            .expect("recv timed out")
+            .expect("recv failed");
+        match buffered {
+            DebuggeeEvent::Print { message, .. } => assert_eq!(message, "interleaved!"),
+            other => panic!("expected buffered Print, got {other:?}"),
+        }
+
+        let _ = tokio::time::timeout(TEST_TIMEOUT, server).await;
+    }
+
+    #[tokio::test]
+    async fn request_ignores_responses_with_other_seq() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut codec = MessageCodec::new();
+            let mut buf = BytesMut::new();
+            let _protocol_response =
+                server_handshake(&mut sock, &mut codec, &mut buf, default_protocol_event()).await;
+
+            let request = recv_frame(&mut sock, &mut codec, &mut buf).await;
+            let seq = request["request_seq"].as_u64().unwrap();
+
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "debuggee-response",
+                    "request_seq": 99999,
+                    "success": true
+                }),
+            )
+            .await;
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "debuggee-response",
+                    "request_seq": seq,
+                    "args": {"ok": true},
+                    "success": true
+                }),
+            )
+            .await;
+        });
+
+        let (mut conn, _) = tokio::time::timeout(
+            TEST_TIMEOUT,
+            DebuggeeConnection::connect("127.0.0.1", port),
+        )
+        .await
+        .expect("connect timed out")
+        .expect("connect failed");
+
+        let response = tokio::time::timeout(TEST_TIMEOUT, conn.stack_trace(0))
+            .await
+            .expect("request timed out")
+            .expect("request failed");
+        assert!(response.success);
+
+        let stray = tokio::time::timeout(TEST_TIMEOUT, conn.recv_event())
+            .await
+            .expect("recv timed out")
+            .expect("recv failed");
+        match stray {
+            DebuggeeEvent::DebuggeeResponse { request_seq: 99999, .. } => {}
+            other => panic!("expected stray DebuggeeResponse(99999), got {other:?}"),
+        }
+
+        let _ = tokio::time::timeout(TEST_TIMEOUT, server).await;
     }
 }
