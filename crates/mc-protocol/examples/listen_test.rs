@@ -1,15 +1,43 @@
+use clap::Parser;
 use mc_protocol::{
-    DebuggeeConnection, DebuggeeEvent, DebuggerEvent, ProtocolHandshake, DEFAULT_PORT,
+    ConnectOptions, DebuggeeConnection, DebuggeeEvent, DebuggerEvent, ProtocolHandshake,
+    DEFAULT_PORT,
 };
+
+#[derive(Parser)]
+#[command(about = "Listen for Minecraft Bedrock debug connections on 127.0.0.1:19144")]
+struct Args {
+    /// UUID of the script module to attach to.
+    /// Auto-detected when MC has exactly one plugin; required when multiple are present.
+    #[arg(long)]
+    target_module_uuid: Option<String>,
+
+    /// Passcode (only needed if Minecraft requires one).
+    #[arg(long)]
+    passcode: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    let opts = ConnectOptions {
+        target_module_uuid: args.target_module_uuid,
+        passcode: args.passcode,
+    };
+
     println!("=== mc-protocol listen test ===");
     println!("Listening on 127.0.0.1:{}", DEFAULT_PORT);
     println!("Run in MC Bedrock chat: /script debugger connect");
+    if opts.target_module_uuid.is_some() {
+        println!("Target module UUID: {:?}", opts.target_module_uuid);
+    }
+    if opts.passcode.is_some() {
+        println!("Passcode: <provided>");
+    }
     println!();
 
-    let (mut conn, handshake) = DebuggeeConnection::listen(DEFAULT_PORT).await?;
+    let (mut conn, handshake) =
+        DebuggeeConnection::listen_with_options(DEFAULT_PORT, opts).await?;
 
     let peer = conn
         .peer_addr()
