@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::{Decoder, Encoder};
@@ -119,6 +120,14 @@ impl DebuggeeConnection {
             }
             self.read_buf.extend_from_slice(&tmp[..n]);
         }
+    }
+
+    pub fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+        self.stream.peer_addr()
+    }
+
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.stream.local_addr()
     }
 }
 
