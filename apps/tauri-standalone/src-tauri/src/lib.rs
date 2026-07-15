@@ -42,7 +42,7 @@ async fn get_handshake_info(
 async fn pause_thread(
     state: tauri::State<'_, mc_tauri::AppState>,
     thread_id: u32,
-) -> Result<mc_tauri::ResponsePayload, String> {
+) -> Result<(), String> {
     mc_tauri::pause_thread(&state, thread_id).await
 }
 
@@ -50,7 +50,7 @@ async fn pause_thread(
 async fn continue_thread(
     state: tauri::State<'_, mc_tauri::AppState>,
     thread_id: u32,
-) -> Result<mc_tauri::ResponsePayload, String> {
+) -> Result<(), String> {
     mc_tauri::continue_thread(&state, thread_id).await
 }
 
@@ -58,7 +58,7 @@ async fn continue_thread(
 async fn step_next(
     state: tauri::State<'_, mc_tauri::AppState>,
     thread_id: u32,
-) -> Result<mc_tauri::ResponsePayload, String> {
+) -> Result<(), String> {
     mc_tauri::step_next(&state, thread_id).await
 }
 
@@ -66,7 +66,7 @@ async fn step_next(
 async fn step_in(
     state: tauri::State<'_, mc_tauri::AppState>,
     thread_id: u32,
-) -> Result<mc_tauri::ResponsePayload, String> {
+) -> Result<(), String> {
     mc_tauri::step_in(&state, thread_id).await
 }
 
@@ -74,7 +74,7 @@ async fn step_in(
 async fn step_out(
     state: tauri::State<'_, mc_tauri::AppState>,
     thread_id: u32,
-) -> Result<mc_tauri::ResponsePayload, String> {
+) -> Result<(), String> {
     mc_tauri::step_out(&state, thread_id).await
 }
 

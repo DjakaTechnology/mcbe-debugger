@@ -19,3 +19,11 @@ Lessons learned during development. Read at session start.
 **Rule:** Test helpers that do framed socket reads must take `codec: &mut MessageCodec` and `buf: &mut BytesMut` as parameters (or otherwise share state across all reads in the test). Never drop the buffer between reads — TCP coalesces adjacent frames on localhost, and the codec's state machine can leave residual bytes in the buffer that the next read depends on.
 
 **Apply to:** Any test against a real (or mock) socket using a stateful codec. If the helper "simplifies" by hiding codec/buffer creation inside itself, that's the bug pattern.
+
+### 2026-07-15 — Some MC debugger commands are fire-and-forget (no debuggee-response)
+
+**Mistake:** Assumed every `DebuggerEvent::Request` would get a matching `DebuggeeResponse`. Implemented pause/step/continue using the request/response pattern. Live testing against real MC Bedrock: clicking Pause hung the UI forever on a spinner because MC never sent a debuggee-response — it just paused and emitted StoppedEvent.
+
+**Rule:** Control-flow commands (pause, continue, step_next, step_in, step_out) are fire-and-forget on MC's side. The "response" is the asynchronous StoppedEvent (or for continue, simply no event until the next break). Only commands that need to return data — evaluate, stackTrace, scopes, variables, threads — actually wait for a debuggee-response. When porting a debugger protocol, classify each command as "needs result" vs "control only" before wiring up the request/response infrastructure.
+
+**Apply to:** Any request/response-style protocol where some commands are semantically ack-only. Don't assume uniform response behavior across all command types.

@@ -138,11 +138,11 @@ type Responder = oneshot::Sender<Result<ResponsePayload, String>>;
 
 enum Command {
     SendEvent(DebuggerEvent),
-    Pause { thread_id: u32, response_tx: Responder },
-    Continue { thread_id: u32, response_tx: Responder },
-    StepNext { thread_id: u32, response_tx: Responder },
-    StepIn { thread_id: u32, response_tx: Responder },
-    StepOut { thread_id: u32, response_tx: Responder },
+    Pause { thread_id: u32 },
+    Continue { thread_id: u32 },
+    StepNext { thread_id: u32 },
+    StepIn { thread_id: u32 },
+    StepOut { thread_id: u32 },
     Evaluate {
         expression: String,
         response_tx: Responder,
@@ -229,59 +229,24 @@ pub async fn get_handshake_info(state: &AppState) -> Result<Option<HandshakeInfo
     Ok(state.handshake.lock().await.clone())
 }
 
-pub async fn pause_thread(
-    state: &AppState,
-    thread_id: u32,
-) -> Result<ResponsePayload, String> {
-    send_request(state, |tx| Command::Pause {
-        thread_id,
-        response_tx: tx,
-    })
-    .await
+pub async fn pause_thread(state: &AppState, thread_id: u32) -> Result<(), String> {
+    send_fire_and_forget(state, Command::Pause { thread_id }).await
 }
 
-pub async fn continue_thread(
-    state: &AppState,
-    thread_id: u32,
-) -> Result<ResponsePayload, String> {
-    send_request(state, |tx| Command::Continue {
-        thread_id,
-        response_tx: tx,
-    })
-    .await
+pub async fn continue_thread(state: &AppState, thread_id: u32) -> Result<(), String> {
+    send_fire_and_forget(state, Command::Continue { thread_id }).await
 }
 
-pub async fn step_next(
-    state: &AppState,
-    thread_id: u32,
-) -> Result<ResponsePayload, String> {
-    send_request(state, |tx| Command::StepNext {
-        thread_id,
-        response_tx: tx,
-    })
-    .await
+pub async fn step_next(state: &AppState, thread_id: u32) -> Result<(), String> {
+    send_fire_and_forget(state, Command::StepNext { thread_id }).await
 }
 
-pub async fn step_in(
-    state: &AppState,
-    thread_id: u32,
-) -> Result<ResponsePayload, String> {
-    send_request(state, |tx| Command::StepIn {
-        thread_id,
-        response_tx: tx,
-    })
-    .await
+pub async fn step_in(state: &AppState, thread_id: u32) -> Result<(), String> {
+    send_fire_and_forget(state, Command::StepIn { thread_id }).await
 }
 
-pub async fn step_out(
-    state: &AppState,
-    thread_id: u32,
-) -> Result<ResponsePayload, String> {
-    send_request(state, |tx| Command::StepOut {
-        thread_id,
-        response_tx: tx,
-    })
-    .await
+pub async fn step_out(state: &AppState, thread_id: u32) -> Result<(), String> {
+    send_fire_and_forget(state, Command::StepOut { thread_id }).await
 }
 
 pub async fn evaluate(
@@ -293,6 +258,12 @@ pub async fn evaluate(
         response_tx: tx,
     })
     .await
+}
+
+async fn send_fire_and_forget(state: &AppState, cmd: Command) -> Result<(), String> {
+    let guard = state.cmd_tx.lock().await;
+    let sender = guard.as_ref().ok_or("not connected")?;
+    sender.send(cmd).await.map_err(|e| e.to_string())
 }
 
 async fn send_request<F>(state: &AppState, build: F) -> Result<ResponsePayload, String>
@@ -337,45 +308,35 @@ async fn connection_task(
                         return;
                     }
                 }
-                Some(Command::Pause { thread_id, response_tx }) => {
-                    let result = conn
-                        .pause(thread_id)
-                        .await
-                        .map(ResponsePayload::from)
-                        .map_err(|e| e.to_string());
-                    let _ = response_tx.send(result);
+                Some(Command::Pause { thread_id }) => {
+                    if conn.pause(thread_id).await.is_err() {
+                        let _ = app.emit("mc-disconnected", ());
+                        return;
+                    }
                 }
-                Some(Command::Continue { thread_id, response_tx }) => {
-                    let result = conn
-                        .continue_thread(thread_id)
-                        .await
-                        .map(ResponsePayload::from)
-                        .map_err(|e| e.to_string());
-                    let _ = response_tx.send(result);
+                Some(Command::Continue { thread_id }) => {
+                    if conn.continue_thread(thread_id).await.is_err() {
+                        let _ = app.emit("mc-disconnected", ());
+                        return;
+                    }
                 }
-                Some(Command::StepNext { thread_id, response_tx }) => {
-                    let result = conn
-                        .step_next(thread_id)
-                        .await
-                        .map(ResponsePayload::from)
-                        .map_err(|e| e.to_string());
-                    let _ = response_tx.send(result);
+                Some(Command::StepNext { thread_id }) => {
+                    if conn.step_next(thread_id).await.is_err() {
+                        let _ = app.emit("mc-disconnected", ());
+                        return;
+                    }
                 }
-                Some(Command::StepIn { thread_id, response_tx }) => {
-                    let result = conn
-                        .step_in(thread_id)
-                        .await
-                        .map(ResponsePayload::from)
-                        .map_err(|e| e.to_string());
-                    let _ = response_tx.send(result);
+                Some(Command::StepIn { thread_id }) => {
+                    if conn.step_in(thread_id).await.is_err() {
+                        let _ = app.emit("mc-disconnected", ());
+                        return;
+                    }
                 }
-                Some(Command::StepOut { thread_id, response_tx }) => {
-                    let result = conn
-                        .step_out(thread_id)
-                        .await
-                        .map(ResponsePayload::from)
-                        .map_err(|e| e.to_string());
-                    let _ = response_tx.send(result);
+                Some(Command::StepOut { thread_id }) => {
+                    if conn.step_out(thread_id).await.is_err() {
+                        let _ = app.emit("mc-disconnected", ());
+                        return;
+                    }
                 }
                 Some(Command::Evaluate {
                     expression,

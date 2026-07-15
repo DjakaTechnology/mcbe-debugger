@@ -256,10 +256,8 @@
     busy = true;
     error = null;
     try {
-      const result = await invoke<ResponsePayload>(command, { threadId });
-      if (!result.success) {
-        error = result.message ?? `${command} failed`;
-      } else if (clearStopped) {
+      await invoke(command, { threadId });
+      if (clearStopped) {
         stopped = false;
       }
     } catch (e) {

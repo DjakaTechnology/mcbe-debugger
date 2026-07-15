@@ -240,41 +240,56 @@ impl DebuggeeConnection {
     pub async fn step_next(
         &mut self,
         thread_id: u32,
-    ) -> Result<DebuggeeResponse, ConnectionError> {
-        self.request("next", serde_json::json!({"threadId": thread_id}))
+    ) -> Result<(), ConnectionError> {
+        self.send_request_no_wait("next", serde_json::json!({"threadId": thread_id}))
             .await
     }
 
     pub async fn step_in(
         &mut self,
         thread_id: u32,
-    ) -> Result<DebuggeeResponse, ConnectionError> {
-        self.request("stepIn", serde_json::json!({"threadId": thread_id}))
+    ) -> Result<(), ConnectionError> {
+        self.send_request_no_wait("stepIn", serde_json::json!({"threadId": thread_id}))
             .await
     }
 
     pub async fn step_out(
         &mut self,
         thread_id: u32,
-    ) -> Result<DebuggeeResponse, ConnectionError> {
-        self.request("stepOut", serde_json::json!({"threadId": thread_id}))
+    ) -> Result<(), ConnectionError> {
+        self.send_request_no_wait("stepOut", serde_json::json!({"threadId": thread_id}))
             .await
     }
 
     pub async fn continue_thread(
         &mut self,
         thread_id: u32,
-    ) -> Result<DebuggeeResponse, ConnectionError> {
-        self.request("continue", serde_json::json!({"threadId": thread_id}))
+    ) -> Result<(), ConnectionError> {
+        self.send_request_no_wait("continue", serde_json::json!({"threadId": thread_id}))
             .await
     }
 
     pub async fn pause(
         &mut self,
         thread_id: u32,
-    ) -> Result<DebuggeeResponse, ConnectionError> {
-        self.request("pause", serde_json::json!({"threadId": thread_id}))
+    ) -> Result<(), ConnectionError> {
+        self.send_request_no_wait("pause", serde_json::json!({"threadId": thread_id}))
             .await
+    }
+
+    pub async fn send_request_no_wait(
+        &mut self,
+        command: impl Into<String>,
+        args: serde_json::Value,
+    ) -> Result<(), ConnectionError> {
+        let seq = self.next_request_seq;
+        self.next_request_seq = self.next_request_seq.checked_add(1).unwrap_or(1);
+        self.send_event(&DebuggerEvent::Request {
+            request_seq: seq,
+            command: command.into(),
+            args,
+        })
+        .await
     }
 
     pub async fn evaluate(
