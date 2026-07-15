@@ -27,3 +27,17 @@ Lessons learned during development. Read at session start.
 **Rule:** Control-flow commands (pause, continue, step_next, step_in, step_out) are fire-and-forget on MC's side. The "response" is the asynchronous StoppedEvent (or for continue, simply no event until the next break). Only commands that need to return data — evaluate, stackTrace, scopes, variables, threads — actually wait for a debuggee-response. When porting a debugger protocol, classify each command as "needs result" vs "control only" before wiring up the request/response infrastructure.
 
 **Apply to:** Any request/response-style protocol where some commands are semantically ack-only. Don't assume uniform response behavior across all command types.
+
+### 2026-07-15 — Verify the exact response discriminator for each request type
+
+**Mistake:** Read the protocol-events.ts TypeScript definitions and assumed the `DebuggeeResponse` ("debuggee-response") was the response to all `Request` ("request") messages. Lived with mysterious hangs for two iterations (pause first, then evaluate) before investigating the upstream session.ts dispatch code.
+
+**Reality:** The MC protocol has TWO completely separate response systems with different discriminators:
+1. **Basic Request → Response:** `{type:"response", request_seq, body}` — for all DAP commands (evaluate, stackTrace, scopes, variables, etc.)
+2. **DebuggerRequest → DebuggeeResponse:** `{type:"debuggee-response", request_seq, args}` — only for the v7+ webview UI's typed request system
+
+Our code was listening for `"debuggee-response"` (System 2) when awaiting replies to basic Request messages (System 1). MC was correctly sending `"response"` which we treated as Unknown, causing request() to loop forever.
+
+**Rule:** When a protocol has multiple request types, each may have its own response discriminator. Don't trust type-name symmetry (request vs response); verify by reading the actual dispatch/routing code in the reference implementation. The TypeScript interface names were misleading — `DebuggeeResponse` sounds like "the response from the debuggee" but it's actually "the response to DebuggerRequest specifically."
+
+**Apply to:** Any port of a multi-purpose protocol. The "sounds-right" naming is a trap; the dispatch code is the truth.

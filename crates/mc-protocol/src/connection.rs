@@ -61,6 +61,8 @@ pub enum ConnectionError {
     AmbiguousTarget {
         available: Vec<(String, String)>,
     },
+    #[error("request timed out after {0:?} (MC may not respond to this command type)")]
+    RequestTimeout(std::time::Duration),
 }
 
 impl DebuggeeConnection {
@@ -205,6 +207,16 @@ impl DebuggeeConnection {
         command: impl Into<String>,
         args: serde_json::Value,
     ) -> Result<DebuggeeResponse, ConnectionError> {
+        self.request_with_timeout(command, args, std::time::Duration::from_secs(5))
+            .await
+    }
+
+    pub async fn request_with_timeout(
+        &mut self,
+        command: impl Into<String>,
+        args: serde_json::Value,
+        timeout: std::time::Duration,
+    ) -> Result<DebuggeeResponse, ConnectionError> {
         let seq = self.next_request_seq;
         self.next_request_seq = self.next_request_seq.checked_add(1).unwrap_or(1);
 
@@ -215,23 +227,45 @@ impl DebuggeeConnection {
         })
         .await?;
 
+        let deadline = tokio::time::sleep(timeout);
+        tokio::pin!(deadline);
+
         loop {
-            match self.recv_event_inner().await? {
-                DebuggeeEvent::DebuggeeResponse {
-                    request_seq,
-                    args,
-                    success,
-                    response_message,
-                } if request_seq == seq => {
-                    return Ok(DebuggeeResponse {
+            tokio::select! {
+                event_result = self.recv_event_inner() => match event_result? {
+                    DebuggeeEvent::Response {
+                        request_seq,
+                        success,
+                        body,
+                        error,
+                        ..
+                    } if request_seq == seq => {
+                        return Ok(DebuggeeResponse {
+                            request_seq,
+                            args: body,
+                            success: success.unwrap_or(true),
+                            response_message: error,
+                        });
+                    }
+                    DebuggeeEvent::DebuggeeResponse {
                         request_seq,
                         args,
-                        success: success.unwrap_or(true),
+                        success,
                         response_message,
-                    });
-                }
-                other => {
-                    self.event_buffer.push_back(other);
+                    } if request_seq == seq => {
+                        return Ok(DebuggeeResponse {
+                            request_seq,
+                            args,
+                            success: success.unwrap_or(true),
+                            response_message,
+                        });
+                    }
+                    other => {
+                        self.event_buffer.push_back(other);
+                    }
+                },
+                _ = &mut deadline => {
+                    return Err(ConnectionError::RequestTimeout(timeout));
                 }
             }
         }

@@ -56,6 +56,18 @@ pub enum DebuggeeEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         response_message: Option<String>,
     },
+    #[serde(rename = "response")]
+    Response {
+        request_seq: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        success: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
     #[serde(rename = "SchemaEvent")]
     Schema {
         descriptors: Vec<DiagnosticsTabDescriptor>,

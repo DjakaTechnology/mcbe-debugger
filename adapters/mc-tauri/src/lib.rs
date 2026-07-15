@@ -125,6 +125,9 @@ impl From<DebuggeeEvent> for McEvent {
             DebuggeeEvent::DebuggeeResponse { .. } => Self::Unknown {
                 type_name: "debuggee-response".to_string(),
             },
+            DebuggeeEvent::Response { .. } => Self::Unknown {
+                type_name: "response".to_string(),
+            },
             DebuggeeEvent::Schema { descriptors } => Self::Schema {
                 count: descriptors.len(),
             },

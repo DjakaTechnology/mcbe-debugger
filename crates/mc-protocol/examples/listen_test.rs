@@ -131,6 +131,9 @@ fn print_event(event: &DebuggeeEvent) {
         DebuggeeEvent::Schema { descriptors } => {
             format!("Schema ({} tabs)", descriptors.len())
         }
+        DebuggeeEvent::Response { request_seq, success, .. } => {
+            format!("Response seq={} success={:?}", request_seq, success)
+        }
         DebuggeeEvent::Terminated { reason } => {
             format!("Terminated (reason={:?})", reason)
         }

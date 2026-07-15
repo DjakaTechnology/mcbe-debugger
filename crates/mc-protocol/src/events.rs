@@ -45,6 +45,7 @@ const KNOWN_INCOMING_TYPE_TAGS: &[&str] = &[
     "StatEvent2",
     "ProfilerCapture",
     "debuggee-response",
+    "response",
     "SchemaEvent",
     "terminated",
 ];
