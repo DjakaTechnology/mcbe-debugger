@@ -231,10 +231,20 @@
       }
       connected = true;
     } catch (e) {
-      error = String(e);
+      if (String(e) !== "cancelled") {
+        error = String(e);
+      }
       connected = false;
     } finally {
       connecting = false;
+    }
+  }
+
+  async function handleCancel() {
+    try {
+      await invoke("cancel_pending_connect");
+    } catch (e) {
+      error = String(e);
     }
   }
 
@@ -505,20 +515,23 @@
           </div>
         {/if}
 
-        {#if !connected}
+        {#if connecting}
+          <button
+            type="button"
+            onclick={handleCancel}
+            class="flex w-full items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-rose-600/20 transition-colors hover:bg-rose-700 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
+          >
+            <LoaderCircle class="h-4 w-4 animate-spin" />
+            {mode === "listen" ? "Stop listening" : "Stop connecting"}
+          </button>
+        {:else if !connected}
           <button
             type="button"
             onclick={handleConnect}
-            disabled={connecting}
-            class="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-indigo-600/20 transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/40 disabled:cursor-not-allowed disabled:bg-indigo-600 disabled:opacity-60"
+            class="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-indigo-600/20 transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
           >
-            {#if connecting}
-              <LoaderCircle class="h-4 w-4 animate-spin" />
-              {mode === "listen" ? "Waiting for MC..." : "Connecting..."}
-            {:else}
-              <Play class="h-4 w-4" />
-              {mode === "listen" ? "Listen" : "Connect"}
-            {/if}
+            <Play class="h-4 w-4" />
+            {mode === "listen" ? "Listen" : "Connect"}
           </button>
         {:else}
           <button

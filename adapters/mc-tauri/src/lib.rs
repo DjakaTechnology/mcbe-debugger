@@ -155,6 +155,7 @@ enum Command {
 pub struct AppState {
     cmd_tx: Mutex<Option<mpsc::Sender<Command>>>,
     handshake: Mutex<Option<HandshakeInfo>>,
+    pending_cancel: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 impl AppState {
@@ -162,6 +163,7 @@ impl AppState {
         Self {
             cmd_tx: Mutex::new(None),
             handshake: Mutex::new(None),
+            pending_cancel: Mutex::new(None),
         }
     }
 }
@@ -183,10 +185,8 @@ pub async fn listen_to_minecraft(
         target_module_uuid,
         passcode,
     };
-    let (conn, hs) = DebuggeeConnection::listen_with_options(port, opts)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(spawn_connection(state, app, conn, hs).await)
+    let result = run_cancellable(state, DebuggeeConnection::listen_with_options(port, opts)).await?;
+    Ok(spawn_connection(state, app, result.0, result.1).await)
 }
 
 pub async fn connect_to_minecraft(
@@ -201,10 +201,42 @@ pub async fn connect_to_minecraft(
         target_module_uuid,
         passcode,
     };
-    let (conn, hs) = DebuggeeConnection::connect_with_options(&host, port, opts)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(spawn_connection(state, app, conn, hs).await)
+    let result = run_cancellable(
+        state,
+        DebuggeeConnection::connect_with_options(&host, port, opts),
+    )
+    .await?;
+    Ok(spawn_connection(state, app, result.0, result.1).await)
+}
+
+async fn run_cancellable<F>(
+    state: &AppState,
+    future: F,
+) -> Result<(DebuggeeConnection, mc_protocol::ProtocolHandshake), String>
+where
+    F: std::future::Future<Output = Result<(DebuggeeConnection, mc_protocol::ProtocolHandshake), mc_protocol::ConnectionError>>,
+{
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    *state.pending_cancel.lock().await = Some(cancel_tx);
+
+    let result = tokio::select! {
+        result = future => Some(result),
+        _ = cancel_rx => None,
+    };
+
+    *state.pending_cancel.lock().await = None;
+
+    match result {
+        Some(r) => r.map_err(|e| e.to_string()),
+        None => Err("cancelled".to_string()),
+    }
+}
+
+pub async fn cancel_pending_connect(state: &AppState) -> Result<(), String> {
+    if let Some(tx) = state.pending_cancel.lock().await.take() {
+        let _ = tx.send(());
+    }
+    Ok(())
 }
 
 async fn spawn_connection(
