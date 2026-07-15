@@ -32,11 +32,6 @@ async fn disconnect(state: tauri::State<'_, mc_tauri::AppState>) -> Result<(), S
 }
 
 #[tauri::command]
-async fn send_resume(state: tauri::State<'_, mc_tauri::AppState>) -> Result<(), String> {
-    mc_tauri::send_resume(&state).await
-}
-
-#[tauri::command]
 async fn get_handshake_info(
     state: tauri::State<'_, mc_tauri::AppState>,
 ) -> Result<Option<mc_tauri::HandshakeInfo>, String> {
@@ -53,7 +48,6 @@ pub fn run() {
             listen_to_minecraft,
             connect_to_minecraft,
             disconnect,
-            send_resume,
             get_handshake_info,
         ])
         .run(tauri::generate_context!())

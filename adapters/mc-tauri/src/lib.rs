@@ -185,6 +185,9 @@ async fn spawn_connection(
     let info = handshake_to_info(&hs);
     *state.handshake.lock().await = Some(info.clone());
     let (tx, rx) = mpsc::channel(16);
+    let _ = tx
+        .send(Command::SendEvent(DebuggerEvent::Resume))
+        .await;
     *state.cmd_tx.lock().await = Some(tx);
     tokio::spawn(connection_task(conn, app, rx));
     info
@@ -194,14 +197,6 @@ pub async fn disconnect(state: &AppState) -> Result<(), String> {
     state.cmd_tx.lock().await.take();
     *state.handshake.lock().await = None;
     Ok(())
-}
-
-pub async fn send_resume(state: &AppState) -> Result<(), String> {
-    let guard = state.cmd_tx.lock().await;
-    let tx = guard.as_ref().ok_or("not connected")?;
-    tx.send(Command::SendEvent(DebuggerEvent::Resume))
-        .await
-        .map_err(|e| e.to_string())
 }
 
 pub async fn get_handshake_info(state: &AppState) -> Result<Option<HandshakeInfo>, String> {

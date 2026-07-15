@@ -111,14 +111,6 @@
     }
   }
 
-  async function handleResume() {
-    try {
-      await invoke("send_resume");
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
   function clearLog() {
     events = [];
   }
@@ -207,7 +199,6 @@
           </button>
         {:else}
           <button type="button" onclick={handleDisconnect}>Disconnect</button>
-          <button type="button" onclick={handleResume}>Send Resume</button>
         {/if}
       </div>
     </form>
