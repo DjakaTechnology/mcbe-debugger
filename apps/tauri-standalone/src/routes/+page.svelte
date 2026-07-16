@@ -142,6 +142,22 @@
     client: true,
     uncategorized: true,
   });
+  let selectedClient = $state<string | "all">("all");
+
+  function getClientId(path: string): string | null {
+    const parts = path.split(".");
+    if (parts.length < 3 || parts[0] !== "client_stats") return null;
+    return parts[1];
+  }
+
+  let clientIds = $derived.by(() => {
+    const ids = new Set<string>();
+    for (const series of Object.values(statsCollection)) {
+      const clientId = getClientId(series.path);
+      if (clientId) ids.add(clientId);
+    }
+    return Array.from(ids).sort();
+  });
 
   const kindOrder: McEvent["kind"][] = [
     "protocol",
@@ -352,9 +368,35 @@
     return val.toFixed(1);
   }
 
+  function isMemoryGroup(groupName: string): boolean {
+    return groupName.toLowerCase().includes("memory");
+  }
+
+  function formatMemoryValue(mb: number): string {
+    return mb.toFixed(2) + " MB";
+  }
+
+  function formatGroupValue(groupName: string, val: number | undefined): string {
+    if (val === undefined) return "—";
+    if (isMemoryGroup(groupName)) return formatMemoryValue(val / 1048576);
+    return formatStatValue(val);
+  }
+
+  function isEmptySeries(series: StatSeries): boolean {
+    return !series.values.some((v) => v !== null && v !== undefined && v !== 0);
+  }
+
+  function scaleSeriesForDisplay(series: StatSeries, groupName: string): StatSeries {
+    if (!isMemoryGroup(groupName)) return series;
+    return {
+      ...series,
+      values: series.values.map((v) => v / 1048576),
+    };
+  }
+
   function yAxisLabel(groupName: string): string {
     const n = groupName.toLowerCase();
-    if (n.includes("memory")) return "↑ bytes";
+    if (n.includes("memory")) return "↑ MB";
     if (n.includes("tick") || n.includes("timing")) return "↑ ms";
     if (n.includes("entit") || n.includes("count") || n.includes("handle")) return "↑ count";
     if (n.includes("network") || n.includes("packet")) return "↑ pkts";
@@ -1077,37 +1119,95 @@
 
                 {#if expandedCategories[category.key]}
                   <div transition:slide={{ duration: 200, easing: cubicOut }}>
+                    {#if category.key === "client" && clientIds.length > 1}
+                      <div class="mb-4 flex items-center gap-2">
+                        <span class="text-xs font-medium text-zinc-500 dark:text-zinc-400">Client</span>
+                        <select
+                          bind:value={selectedClient}
+                          class="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-900 outline-none transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                        >
+                          <option value="all">All clients</option>
+                          {#each clientIds as clientId}
+                            <option value={clientId}>{clientId}</option>
+                          {/each}
+                        </select>
+                      </div>
+                    {/if}
+
                     <div class="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
                       {#each category.groups as group (group.name)}
-                        {@const seriesNames = group.series.map((s) => shortName(s.path))}
-                        {@const groupData = buildGroupData(group.series)}
-                        {@const lastVal = group.series[0]?.values[group.series[0]?.values.length - 1]}
-                        <div class="group/card rounded-xl border border-zinc-200 bg-white p-4 shadow-sm transition-all hover:border-indigo-200 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-950 dark:hover:border-indigo-900/50">
-                          <div class="mb-3 flex items-start justify-between gap-3">
-                            <div class="min-w-0">
-                              <h3 class="truncate text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">{group.name}</h3>
-                              <p class="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
-                                {#if group.series.length === 1}
-                                  {shortName(group.series[0].path)}
-                                {:else}
-                                  {group.series.length} series
-                                {/if}
-                              </p>
+                        {#if group.name === "dynamic_property_values"}
+                          <div class="group/card rounded-xl border border-zinc-200 bg-white p-4 shadow-sm transition-all hover:border-indigo-200 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-950 dark:hover:border-indigo-900/50">
+                            <div class="mb-3 flex items-start justify-between gap-3">
+                              <div class="min-w-0">
+                                <h3 class="truncate text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">{group.name}</h3>
+                                <p class="truncate text-[10px] text-zinc-500 dark:text-zinc-400">{group.series.length} properties</p>
+                              </div>
                             </div>
-                            {#if group.series.length === 1}
-                              <span class="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 font-mono text-xs font-semibold text-indigo-600 dark:bg-indigo-950/30 dark:text-indigo-400">
-                                {formatStatValue(lastVal)}
-                              </span>
-                            {:else}
-                              <span class="shrink-0 rounded-full bg-zinc-100 px-2 py-0.5 font-mono text-xs font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                                {group.series.length}
-                              </span>
-                            {/if}
+                            <div class="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
+                              <table class="w-full text-left text-xs">
+                                <thead class="bg-zinc-50 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
+                                  <tr>
+                                    <th class="px-3 py-2 font-medium">Property</th>
+                                    <th class="px-3 py-2 text-right font-medium">Value</th>
+                                  </tr>
+                                </thead>
+                                <tbody class="divide-y divide-zinc-200 dark:divide-zinc-800">
+                                  {#each group.series as series (series.path)}
+                                    {@const rawVal = series.values[series.values.length - 1]}
+                                    <tr class="transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900">
+                                      <td class="px-3 py-2 font-medium text-zinc-700 dark:text-zinc-300">{shortName(series.path)}</td>
+                                      <td class="px-3 py-2 text-right font-mono text-zinc-600 dark:text-zinc-400">
+                                        {#if rawVal === undefined || rawVal === null}
+                                          —
+                                        {:else if typeof rawVal === "number"}
+                                          {formatStatValue(rawVal)}
+                                        {:else}
+                                          {String(rawVal)}
+                                        {/if}
+                                      </td>
+                                    </tr>
+                                  {/each}
+                                </tbody>
+                              </table>
+                            </div>
                           </div>
-                          <div class="relative overflow-hidden rounded-lg bg-zinc-50/50 text-zinc-500 dark:bg-zinc-900/50 dark:text-zinc-400">
-                            <UPlotChart options={makeChartOptions(group.name, seriesNames)} data={groupData} />
-                          </div>
-                        </div>
+                        {:else}
+                          {@const activeSeries = group.series.filter((s) => !isEmptySeries(s))}
+                          {@const filteredSeries = category.key === "client" && selectedClient !== "all" ? activeSeries.filter((s) => getClientId(s.path) === selectedClient) : activeSeries}
+                          {@const displaySeries = filteredSeries.map((s) => scaleSeriesForDisplay(s, group.name))}
+                          {#if displaySeries.length > 0}
+                            {@const seriesNames = displaySeries.map((s) => shortName(s.path))}
+                            {@const groupData = buildGroupData(displaySeries)}
+                            {@const rawLastVal = filteredSeries[0]?.values[filteredSeries[0]?.values.length - 1]}
+                            <div class="group/card rounded-xl border border-zinc-200 bg-white p-4 shadow-sm transition-all hover:border-indigo-200 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-950 dark:hover:border-indigo-900/50">
+                              <div class="mb-3 flex items-start justify-between gap-3">
+                                <div class="min-w-0">
+                                  <h3 class="truncate text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">{group.name}</h3>
+                                  <p class="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                                    {#if displaySeries.length === 1}
+                                      {shortName(displaySeries[0].path)}
+                                    {:else}
+                                      {displaySeries.length} series
+                                    {/if}
+                                  </p>
+                                </div>
+                                {#if displaySeries.length === 1}
+                                  <span class="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 font-mono text-xs font-semibold text-indigo-600 dark:bg-indigo-950/30 dark:text-indigo-400">
+                                    {formatGroupValue(group.name, rawLastVal)}
+                                  </span>
+                                {:else}
+                                  <span class="shrink-0 rounded-full bg-zinc-100 px-2 py-0.5 font-mono text-xs font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                                    {displaySeries.length}
+                                  </span>
+                                {/if}
+                              </div>
+                              <div class="relative overflow-hidden rounded-lg bg-zinc-50/50 text-zinc-500 dark:bg-zinc-900/50 dark:text-zinc-400">
+                                <UPlotChart options={makeChartOptions(group.name, seriesNames)} data={groupData} formatValue={isMemoryGroup(group.name) ? formatMemoryValue : undefined} />
+                              </div>
+                            </div>
+                          {/if}
+                        {/if}
                       {/each}
                     </div>
                   </div>

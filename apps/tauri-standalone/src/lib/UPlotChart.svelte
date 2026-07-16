@@ -2,7 +2,7 @@
   import uPlot from "uplot";
   import "uplot/dist/uPlot.min.css";
 
-  let { options, data }: { options: any; data: any } = $props();
+  let { options, data, formatValue }: { options: any; data: any; formatValue?: (val: number) => string } = $props();
   let el = $state<HTMLDivElement>();
   let tooltipEl = $state<HTMLDivElement>();
   let chart: uPlot | null = null;
@@ -29,9 +29,11 @@
         if (val !== null && val !== undefined) {
           const formatted =
             typeof val === "number"
-              ? Math.abs(val) >= 1000
-                ? val.toFixed(0)
-                : val.toFixed(2)
+              ? formatValue
+                ? formatValue(val)
+                : Math.abs(val) >= 1000
+                  ? val.toFixed(0)
+                  : val.toFixed(2)
               : String(val);
           html += `<div style="color:${stroke}">${label}: ${formatted}</div>`;
         }
