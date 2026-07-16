@@ -32,6 +32,7 @@
   import CornerDownRight from "@lucide/svelte/icons/corner-down-right";
   import CornerUpRight from "@lucide/svelte/icons/corner-up-right";
   import Send from "@lucide/svelte/icons/send";
+  import UPlotChart from "$lib/UPlotChart.svelte";
 
   type PluginInfo = { name: string; module_uuid: string };
   type HandshakeInfo = {
@@ -105,6 +106,11 @@
   let commandInput = $state("");
   let commandHistory = $state<string[]>([]);
 
+  let activeTab = $state<"log" | "stats">("log");
+
+  type StatSeries = { name: string; path: string; ticks: number[]; values: number[] };
+  let statsCollection = $state<Record<string, StatSeries>>({});
+
   const kindOrder: McEvent["kind"][] = [
     "protocol",
     "stopped",
@@ -170,6 +176,9 @@
     Promise.all([
       listen<McEvent>("mc-event", (e) => {
         events = [...events, e.payload].slice(-500);
+        if (e.payload.kind === "stat2") {
+          accumulateStats(e.payload.stats, e.payload.tick);
+        }
         if (e.payload.kind === "stopped") {
           stopped = true;
           stoppedThreadId = e.payload.thread;
@@ -267,6 +276,63 @@
     } catch (e) {
       error = String(e);
     }
+  }
+
+  function extractLastNumber(values: unknown[] | undefined): number | null {
+    if (!values || values.length === 0) return null;
+    const last = values[values.length - 1];
+    if (typeof last === "number") return last;
+    if (typeof last === "string") {
+      const n = parseFloat(last);
+      return isNaN(n) ? null : n;
+    }
+    return null;
+  }
+
+  function accumulateStats(stats: StatDataModel[], tick: number, prefix = "") {
+    for (const stat of stats) {
+      const path = prefix ? `${prefix}.${stat.name}` : stat.name;
+      const value = extractLastNumber(stat.values);
+      if (value !== null) {
+        if (!statsCollection[path]) {
+          statsCollection[path] = { name: path, path, ticks: [], values: [] };
+        }
+        const s = statsCollection[path];
+        s.ticks.push(tick);
+        s.values.push(value);
+        if (s.ticks.length > 300) {
+          s.ticks.shift();
+          s.values.shift();
+        }
+      }
+      if (stat.children) {
+        accumulateStats(stat.children, tick, path);
+      }
+    }
+    statsCollection = { ...statsCollection };
+  }
+
+  function formatStatValue(val: number | undefined): string {
+    if (val === undefined) return "—";
+    if (Math.abs(val) >= 1e9) return (val / 1e9).toFixed(2) + "B";
+    if (Math.abs(val) >= 1e6) return (val / 1e6).toFixed(2) + "M";
+    if (Math.abs(val) >= 1e3) return (val / 1e3).toFixed(1) + "K";
+    return val.toFixed(1);
+  }
+
+  function makeChartOptions(title: string) {
+    return {
+      width: 340,
+      height: 100,
+      series: [
+        { label: "tick" },
+        { label: title, stroke: "#396cd8", width: 2, fill: "rgba(57, 108, 216, 0.1)" },
+      ],
+      scales: { x: { time: false }, y: { auto: true } },
+      axes: [{ show: false }, { size: 45, font: "10px monospace" }],
+      legend: { show: false },
+      cursor: { show: false },
+    };
   }
 
   async function handleDisconnect() {
@@ -731,6 +797,35 @@
       </div>
     {/if}
 
+    {#if connected}
+      <div class="flex gap-1 border-b border-zinc-200 bg-zinc-50 px-3 py-1.5 dark:border-zinc-800 dark:bg-zinc-900">
+        <button
+          type="button"
+          onclick={() => (activeTab = "log")}
+          class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors {activeTab === 'log'
+            ? 'bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
+            : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300'}"
+        >
+          <ScrollText class="h-3.5 w-3.5" />
+          Event Log
+        </button>
+        <button
+          type="button"
+          onclick={() => (activeTab = "stats")}
+          class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors {activeTab === 'stats'
+            ? 'bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
+            : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300'}"
+        >
+          <BarChart3 class="h-3.5 w-3.5" />
+          Stats
+          {#if Object.keys(statsCollection).length > 0}
+            <span class="ml-0.5 rounded-full bg-indigo-100 px-1.5 py-0.5 text-[9px] font-semibold text-indigo-600 dark:bg-indigo-950/40 dark:text-indigo-400">{Object.keys(statsCollection).length}</span>
+          {/if}
+        </button>
+      </div>
+    {/if}
+
+    {#if activeTab === "log" || !connected}
     <div class="flex min-h-0 flex-1 flex-col p-4">
       <section class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
         <div class="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
@@ -820,6 +915,33 @@
         </div>
       </section>
     </div>
+    {/if}
+
+    {#if connected && activeTab === "stats"}
+      <div class="flex min-h-0 flex-1 flex-col p-4">
+        <div class="flex-1 overflow-y-auto">
+          {#if Object.keys(statsCollection).length === 0}
+            <div class="flex h-full flex-col items-center justify-center text-zinc-400 dark:text-zinc-600">
+              <BarChart3 class="mb-2 h-8 w-8 opacity-50" />
+              <p class="text-sm">No stats yet. Make sure your add-on is running.</p>
+            </div>
+          {:else}
+            <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));">
+              {#each Object.values(statsCollection) as series (series.path)}
+                {@const lastVal = series.values[series.values.length - 1]}
+                <div class="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+                  <div class="mb-1.5 flex items-center justify-between">
+                    <span class="truncate text-xs font-semibold text-zinc-700 dark:text-zinc-300">{series.name}</span>
+                    <span class="font-mono text-sm font-bold text-indigo-600 dark:text-indigo-400">{formatStatValue(lastVal)}</span>
+                  </div>
+                  <UPlotChart options={makeChartOptions(series.name)} data={[series.ticks, series.values]} />
+                </div>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+    {/if}
 
     {#if connected && stopped}
       <div transition:slide={{ duration: 200, easing: cubicOut }} class="border-t border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950">
