@@ -2,6 +2,7 @@ use mc_protocol::{
     ConnectOptions, DebuggeeConnection, DebuggeeEvent, DebuggerEvent, DebuggeeResponse,
     ProtocolHandshake, ProtocolVersion, DEFAULT_PORT,
 };
+use mc_protocol::events::shared::StatDataModel;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{mpsc, oneshot, Mutex};
@@ -75,6 +76,7 @@ pub enum McEvent {
     },
     Stat2 {
         tick: u64,
+        stats: Vec<StatDataModel>,
     },
     ProfilerCapture {
         capture_base_path: String,
@@ -118,7 +120,7 @@ impl From<DebuggeeEvent> for McEvent {
                 message,
                 log_level: log_level as u8,
             },
-            DebuggeeEvent::Stat2 { tick, .. } => Self::Stat2 { tick },
+            DebuggeeEvent::Stat2 { tick, stats } => Self::Stat2 { tick, stats },
             DebuggeeEvent::ProfilerCapture {
                 capture_base_path, ..
             } => Self::ProfilerCapture { capture_base_path },

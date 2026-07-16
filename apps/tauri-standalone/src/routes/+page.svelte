@@ -39,6 +39,12 @@
     plugins: PluginInfo[];
     requirePasscode: boolean;
   };
+  type StatDataModel = {
+    name: string;
+    children?: StatDataModel[];
+    values?: unknown[];
+    should_aggregate?: boolean;
+  };
 
   type McEvent =
     | { kind: "protocol"; version: number; plugins: PluginInfo[]; requirePasscode: boolean }
@@ -46,7 +52,7 @@
     | { kind: "thread"; reason: string; thread: number }
     | { kind: "print"; message: string; logLevel: number }
     | { kind: "notification"; message: string; logLevel: number }
-    | { kind: "stat2"; tick: number }
+    | { kind: "stat2"; tick: number; stats: StatDataModel[] }
     | { kind: "profilerCapture"; captureBasePath: string }
     | { kind: "schema"; count: number }
     | { kind: "terminated"; reason: string | null }
@@ -352,8 +358,10 @@
         return `${t} ${logLevelName(event.logLevel)} ${event.message}`;
       case "notification":
         return `${t} NOTICE ${event.message}`;
-      case "stat2":
-        return `${t} STAT tick=${event.tick}`;
+      case "stat2": {
+        const names = event.stats.map((s) => s.name).join(", ");
+        return `${t} STAT tick=${event.tick} [${names || "empty"}]`;
+      }
       case "profilerCapture":
         return `${t} PROFILER ${event.captureBasePath}`;
       case "schema":
