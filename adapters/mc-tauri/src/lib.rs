@@ -141,6 +141,7 @@ type Responder = oneshot::Sender<Result<ResponsePayload, String>>;
 
 enum Command {
     SendEvent(DebuggerEvent),
+    SendMinecraftCommand { command: String },
     Pause { thread_id: u32 },
     Continue { thread_id: u32 },
     StepNext { thread_id: u32 },
@@ -246,10 +247,7 @@ pub async fn send_minecraft_command(
     let guard = state.cmd_tx.lock().await;
     let sender = guard.as_ref().ok_or("not connected")?;
     sender
-        .send(Command::SendEvent(DebuggerEvent::MinecraftCommand {
-            command,
-            dimension_type: "overworld".to_string(),
-        }))
+        .send(Command::SendMinecraftCommand { command })
         .await
         .map_err(|e| e.to_string())
 }
@@ -354,6 +352,15 @@ async fn connection_task(
             cmd = cmd_rx.recv() => match cmd {
                 Some(Command::SendEvent(event)) => {
                     if conn.send_event(&event).await.is_err() {
+                        let _ = app.emit("mc-disconnected", ());
+                        return;
+                    }
+                }
+                Some(Command::SendMinecraftCommand { command }) => {
+                    if conn.send_minecraft_command(&command, "overworld")
+                        .await
+                        .is_err()
+                    {
                         let _ = app.emit("mc-disconnected", ());
                         return;
                     }

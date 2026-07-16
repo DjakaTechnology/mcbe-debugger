@@ -41,6 +41,7 @@ pub struct DebuggeeConnection {
     read_buf: BytesMut,
     event_buffer: VecDeque<DebuggeeEvent>,
     next_request_seq: u32,
+    version: ProtocolVersion,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -106,6 +107,7 @@ impl DebuggeeConnection {
             read_buf: BytesMut::new(),
             event_buffer: VecDeque::new(),
             next_request_seq: 1,
+            version: ProtocolVersion::CURRENT,
         };
 
         let first = conn.recv_event_inner().await?;
@@ -132,6 +134,7 @@ impl DebuggeeConnection {
                 client: ProtocolVersion::CURRENT.as_u8(),
             }
         })?;
+        conn.version = negotiated;
 
         if require_passcode && opts.passcode.is_none() {
             return Err(ConnectionError::PasscodeRequired);
@@ -181,6 +184,62 @@ impl DebuggeeConnection {
         Ok(())
     }
 
+    async fn send_raw(&mut self, value: serde_json::Value) -> Result<(), ConnectionError> {
+        let mut buf = BytesMut::new();
+        self.codec.encode(value, &mut buf)?;
+        self.stream.write_all(&buf).await?;
+        Ok(())
+    }
+
+    fn build_request_payload(
+        &self,
+        seq: u32,
+        command: impl Into<String>,
+        args: serde_json::Value,
+    ) -> serde_json::Value {
+        let command = command.into();
+        if self.version.as_u8() >= ProtocolVersion::V8.as_u8() {
+            serde_json::json!({
+                "type": "request",
+                "request_seq": seq,
+                "command": command,
+                "args": args,
+            })
+        } else {
+            serde_json::json!({
+                "type": "request",
+                "request": {
+                    "request_seq": seq,
+                    "command": command,
+                    "args": args,
+                },
+            })
+        }
+    }
+
+    pub async fn send_minecraft_command(
+        &mut self,
+        command: &str,
+        dimension_type: &str,
+    ) -> Result<(), ConnectionError> {
+        let payload = if self.version.as_u8() >= ProtocolVersion::V8.as_u8() {
+            serde_json::json!({
+                "type": "minecraftCommand",
+                "command": command,
+                "dimension_type": dimension_type,
+            })
+        } else {
+            serde_json::json!({
+                "type": "minecraftCommand",
+                "command": {
+                    "command": command,
+                    "dimension_type": dimension_type,
+                },
+            })
+        };
+        self.send_raw(payload).await
+    }
+
     pub async fn recv_event(&mut self) -> Result<DebuggeeEvent, ConnectionError> {
         if let Some(event) = self.event_buffer.pop_front() {
             return Ok(event);
@@ -220,12 +279,8 @@ impl DebuggeeConnection {
         let seq = self.next_request_seq;
         self.next_request_seq = self.next_request_seq.checked_add(1).unwrap_or(1);
 
-        self.send_event(&DebuggerEvent::Request {
-            request_seq: seq,
-            command: command.into(),
-            args,
-        })
-        .await?;
+        let payload = self.build_request_payload(seq, command, args);
+        self.send_raw(payload).await?;
 
         let deadline = tokio::time::sleep(timeout);
         tokio::pin!(deadline);
@@ -318,12 +373,8 @@ impl DebuggeeConnection {
     ) -> Result<(), ConnectionError> {
         let seq = self.next_request_seq;
         self.next_request_seq = self.next_request_seq.checked_add(1).unwrap_or(1);
-        self.send_event(&DebuggerEvent::Request {
-            request_seq: seq,
-            command: command.into(),
-            args,
-        })
-        .await
+        let payload = self.build_request_payload(seq, command, args);
+        self.send_raw(payload).await
     }
 
     pub async fn evaluate(
