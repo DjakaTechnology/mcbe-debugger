@@ -32,6 +32,10 @@
   import CornerDownRight from "@lucide/svelte/icons/corner-down-right";
   import CornerUpRight from "@lucide/svelte/icons/corner-up-right";
   import Send from "@lucide/svelte/icons/send";
+  import Gauge from "@lucide/svelte/icons/gauge";
+  import MemoryStick from "@lucide/svelte/icons/memory-stick";
+  import Code from "@lucide/svelte/icons/code";
+  import Monitor from "@lucide/svelte/icons/monitor";
   import UPlotChart from "$lib/UPlotChart.svelte";
 
   type PluginInfo = { name: string; module_uuid: string };
@@ -110,6 +114,34 @@
 
   type StatSeries = { name: string; path: string; ticks: number[]; values: number[] };
   let statsCollection = $state<Record<string, StatSeries>>({});
+
+  type StatCategory = { key: string; label: string; icon: typeof Activity; groups: { name: string; series: StatSeries[] }[] };
+  const statCategoryMap: Record<string, string> = {
+    server_tick_timings: "server-performance",
+    entities: "server-performance",
+    chunks: "server-performance",
+    networking: "server-performance",
+    app_memory: "memory",
+    dynamic_property_values: "memory",
+    handle_counts: "scripting",
+    fine_grained_subscribers: "scripting",
+    client_stats: "client",
+  };
+  const statCategoryOrder = ["server-performance", "memory", "scripting", "client", "uncategorized"];
+  const statCategoryMeta: Record<string, { label: string; icon: typeof Activity }> = {
+    "server-performance": { label: "Server Performance", icon: Gauge },
+    memory: { label: "Memory", icon: MemoryStick },
+    scripting: { label: "Scripting", icon: Code },
+    client: { label: "Client", icon: Monitor },
+    uncategorized: { label: "Uncategorized", icon: HelpCircle },
+  };
+  let expandedCategories = $state<Record<string, boolean>>({
+    "server-performance": true,
+    memory: true,
+    scripting: true,
+    client: true,
+    uncategorized: true,
+  });
 
   const kindOrder: McEvent["kind"][] = [
     "protocol",
@@ -332,15 +364,16 @@
 
   function makeChartOptions(groupName: string, seriesNames: string[]) {
     const colors = ["#396cd8", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899"];
+    const theme = chartThemeColors();
     return {
-      height: 130,
+      height: 140,
       series: [
         { label: "tick" },
         ...seriesNames.map((name, i) => ({
           label: name,
           stroke: colors[i % colors.length],
           width: 1.5,
-          fill: seriesNames.length === 1 ? "rgba(57, 108, 216, 0.08)" : undefined,
+          fill: seriesNames.length === 1 ? theme.fill : undefined,
         })),
       ],
       scales: { x: { time: false }, y: { auto: true } },
@@ -353,6 +386,8 @@
           label: "→ time",
           labelFont: "9px ui-sans-serif, sans-serif",
           size: 18,
+          stroke: theme.text,
+          labelColor: theme.text,
         },
         {
           show: true,
@@ -360,6 +395,9 @@
           labelFont: "9px ui-sans-serif, sans-serif",
           size: 50,
           font: "10px monospace",
+          stroke: theme.text,
+          labelColor: theme.text,
+          grid: { stroke: theme.grid, width: 1 },
         },
       ],
       legend: { show: seriesNames.length > 1, live: true, font: "10px monospace" },
@@ -401,6 +439,28 @@
     }
     return Object.values(groups).sort((a, b) => a.name.localeCompare(b.name));
   });
+
+  let categorizedGroups = $derived.by(() => {
+    const categories: Record<string, StatCategory> = {};
+    for (const key of statCategoryOrder) {
+      const meta = statCategoryMeta[key];
+      categories[key] = { key, label: meta.label, icon: meta.icon, groups: [] };
+    }
+    for (const group of chartGroups) {
+      const categoryKey = statCategoryMap[group.name] ?? "uncategorized";
+      categories[categoryKey].groups.push(group);
+    }
+    return Object.values(categories).filter((cat) => cat.groups.length > 0);
+  });
+
+  function chartThemeColors() {
+    const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+    return {
+      text: isDark ? "#a1a1aa" : "#71717a",
+      grid: isDark ? "#27272a" : "#e4e4e7",
+      fill: isDark ? "rgba(57, 108, 216, 0.15)" : "rgba(57, 108, 216, 0.08)",
+    };
+  }
 
   async function handleDisconnect() {
     try {
@@ -986,33 +1046,74 @@
 
     {#if connected && activeTab === "stats"}
       <div class="flex min-h-0 flex-1 flex-col p-4">
-        <div class="flex-1 overflow-y-auto">
+        <div class="flex-1 space-y-6 overflow-y-auto pr-1">
           {#if Object.keys(statsCollection).length === 0}
             <div class="flex h-full flex-col items-center justify-center text-zinc-400 dark:text-zinc-600">
               <BarChart3 class="mb-2 h-8 w-8 opacity-50" />
               <p class="text-sm">No stats yet. Make sure your add-on is running.</p>
             </div>
           {:else}
-            <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));">
-              {#each chartGroups as group (group.name)}
-                {@const seriesNames = group.series.map((s) => shortName(s.path))}
-                {@const groupData = buildGroupData(group.series)}
-                {@const lastVal = group.series[0]?.values[group.series[0]?.values.length - 1]}
-                <div class="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-                  <div class="mb-1.5 flex items-center justify-between gap-2">
-                    <span class="truncate text-xs font-semibold text-zinc-700 dark:text-zinc-300">{group.name}</span>
-                    <span class="shrink-0 font-mono text-xs text-zinc-500 dark:text-zinc-400">
-                      {#if group.series.length === 1}
-                        {formatStatValue(lastVal)}
-                      {:else}
-                        {group.series.length} series
-                      {/if}
-                    </span>
+            {#each categorizedGroups as category (category.key)}
+              {@const CategoryIcon = category.icon}
+              <section class="border-b border-zinc-200 pb-6 last:border-b-0 dark:border-zinc-800">
+                <button
+                  type="button"
+                  onclick={() => (expandedCategories[category.key] = !expandedCategories[category.key])}
+                  class="mb-4 flex w-full items-center justify-between rounded-lg p-2 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                >
+                  <div class="flex items-center gap-2.5">
+                    <div class="flex h-7 w-7 items-center justify-center rounded-md bg-indigo-50 text-indigo-600 dark:bg-indigo-950/30 dark:text-indigo-400">
+                      <CategoryIcon class="h-4 w-4" />
+                    </div>
+                    <h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{category.label}</h2>
+                    <span class="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{category.groups.length}</span>
                   </div>
-                  <UPlotChart options={makeChartOptions(group.name, seriesNames)} data={groupData} />
-                </div>
-              {/each}
-            </div>
+                  {#if expandedCategories[category.key]}
+                    <ChevronDown class="h-4 w-4 text-zinc-400 dark:text-zinc-500" />
+                  {:else}
+                    <ChevronRight class="h-4 w-4 text-zinc-400 dark:text-zinc-500" />
+                  {/if}
+                </button>
+
+                {#if expandedCategories[category.key]}
+                  <div transition:slide={{ duration: 200, easing: cubicOut }}>
+                    <div class="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+                      {#each category.groups as group (group.name)}
+                        {@const seriesNames = group.series.map((s) => shortName(s.path))}
+                        {@const groupData = buildGroupData(group.series)}
+                        {@const lastVal = group.series[0]?.values[group.series[0]?.values.length - 1]}
+                        <div class="group/card rounded-xl border border-zinc-200 bg-white p-4 shadow-sm transition-all hover:border-indigo-200 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-950 dark:hover:border-indigo-900/50">
+                          <div class="mb-3 flex items-start justify-between gap-3">
+                            <div class="min-w-0">
+                              <h3 class="truncate text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">{group.name}</h3>
+                              <p class="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
+                                {#if group.series.length === 1}
+                                  {shortName(group.series[0].path)}
+                                {:else}
+                                  {group.series.length} series
+                                {/if}
+                              </p>
+                            </div>
+                            {#if group.series.length === 1}
+                              <span class="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 font-mono text-xs font-semibold text-indigo-600 dark:bg-indigo-950/30 dark:text-indigo-400">
+                                {formatStatValue(lastVal)}
+                              </span>
+                            {:else}
+                              <span class="shrink-0 rounded-full bg-zinc-100 px-2 py-0.5 font-mono text-xs font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
+                                {group.series.length}
+                              </span>
+                            {/if}
+                          </div>
+                          <div class="relative overflow-hidden rounded-lg bg-zinc-50/50 text-zinc-500 dark:bg-zinc-900/50 dark:text-zinc-400">
+                            <UPlotChart options={makeChartOptions(group.name, seriesNames)} data={groupData} />
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              </section>
+            {/each}
           {/if}
         </div>
       </div>
