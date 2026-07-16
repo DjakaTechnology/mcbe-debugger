@@ -27,6 +27,7 @@ pub struct PluginInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct HandshakeInfo {
     pub version: u8,
     pub plugins: Vec<PluginInfo>,
@@ -426,5 +427,53 @@ fn handshake_to_info(hs: &ProtocolHandshake) -> HandshakeInfo {
             })
             .collect(),
         require_passcode: hs.require_passcode,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_info_serializes_camel_case() {
+        let info = HandshakeInfo {
+            version: 7,
+            plugins: vec![
+                PluginInfo {
+                    name: "bp.main".into(),
+                    module_uuid: "abc-123".into(),
+                },
+                PluginInfo {
+                    name: "bp.extra".into(),
+                    module_uuid: "def-456".into(),
+                },
+            ],
+            require_passcode: true,
+        };
+
+        let json = serde_json::to_value(&info).unwrap();
+        let map = json.as_object().unwrap();
+
+        // Top-level fields are camelCase
+        assert!(map.contains_key("requirePasscode"), "should have requirePasscode");
+        assert!(map.contains_key("version"), "should have version");
+        assert!(map.contains_key("plugins"), "should have plugins");
+
+        // No snake_case top-level keys
+        assert!(!map.contains_key("require_passcode"), "should NOT have require_passcode");
+
+        // Values
+        assert_eq!(map["requirePasscode"], true);
+        assert_eq!(map["version"], 7);
+
+        // PluginInfo fields remain snake_case
+        let plugins = map["plugins"].as_array().unwrap();
+        assert_eq!(plugins.len(), 2);
+        let p0 = plugins[0].as_object().unwrap();
+        assert!(p0.contains_key("module_uuid"), "PluginInfo should have module_uuid (snake_case)");
+        assert_eq!(p0["module_uuid"], "abc-123");
+        assert_eq!(p0["name"], "bp.main");
+        // PluginInfo should NOT have camelCase keys
+        assert!(!p0.contains_key("moduleUuid"), "PluginInfo should NOT have moduleUuid");
     }
 }

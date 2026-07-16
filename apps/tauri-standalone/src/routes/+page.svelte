@@ -13,6 +13,13 @@
   import type { McEvent, HandshakeInfo, ResponsePayload, StatSeries } from "$lib/types.js";
   import { accumulateStats, buildChartGroups, buildCategorizedGroups, buildClientIds, kindOrder } from "$lib/stats.js";
   import { formatEvent } from "$lib/events.js";
+  import {
+    loadConfig,
+    savePasscode,
+    saveLastTargetModuleUuid,
+    saveKnownPlugins,
+    saveFilterState,
+  } from "$lib/config.js";
 
   import Sidebar from "$lib/components/Sidebar.svelte";
   import DebugControls from "$lib/components/DebugControls.svelte";
@@ -53,6 +60,12 @@
     unknown: true,
   });
   let logLevel = $state<"all" | 0 | 1 | 2>("all");
+
+  // ── Config / auto-relisten state ──────────────────────────────────────
+  let configLoaded = $state(false);
+  let intentionalDisconnect = $state(false);
+  let wasListenMode = $state(false);
+  let autoRelistening = $state(false);
 
   let evalExpression = $state("");
   let evalHistory = $state<{ expression: string; result: ResponsePayload }[]>([]);
@@ -120,7 +133,28 @@
     let unlistens: Array<() => void> = [];
     let cancelled = false;
 
-    Promise.all([
+    // 1) Load persisted config FIRST, then hydrate state
+    loadConfig().then((cfg) => {
+      if (cancelled) return;
+      passcode = cfg.passcode;
+      targetModuleUuid = cfg.lastTargetModuleUuid;
+      searchQuery = cfg.searchQuery;
+      for (const k of Object.keys(cfg.kindFilters)) {
+        if (k in kindFilters) {
+          (kindFilters as Record<string, boolean>)[k] = cfg.kindFilters[k];
+        }
+      }
+      logLevel = cfg.logLevel;
+      configLoaded = true;
+    }).catch((err) => {
+      if (cancelled) return;
+      // Config load failed – retain defaults, mark loaded so saves work, surface error
+      configLoaded = true;
+      error = `Config load failed: ${err}`;
+    });
+
+    // 2) Set up event listeners
+    const setupListeners = Promise.all([
       listen<McEvent>("mc-event", (e) => {
         events = [...events, e.payload].slice(-500);
         if (e.payload.kind === "stat2") {
@@ -143,6 +177,11 @@
         stopped = false;
         stoppedThreadId = null;
         stopReason = "";
+        // Auto-relisten if this was a listen-mode session not torn down by user
+        if (!intentionalDisconnect && wasListenMode && !autoRelistening) {
+          autoRelisten();
+        }
+        intentionalDisconnect = false;
       }),
       listen("mc-terminated", () => {
         disconnected = true;
@@ -151,8 +190,14 @@
         stopped = false;
         stoppedThreadId = null;
         stopReason = "";
+        if (!intentionalDisconnect && wasListenMode && !autoRelistening) {
+          autoRelisten();
+        }
+        intentionalDisconnect = false;
       }),
-    ]).then((uls) => {
+    ]);
+
+    setupListeners.then((uls) => {
       if (cancelled) {
         uls.forEach((ul) => ul());
       } else {
@@ -170,6 +215,8 @@
     connecting = true;
     error = null;
     disconnected = false;
+    intentionalDisconnect = false;
+    wasListenMode = mode === "listen";
     try {
       const targetUuid = targetModuleUuid.trim() || null;
       const pass = passcode.trim() || null;
@@ -188,6 +235,11 @@
         });
       }
       connected = true;
+
+      // Persist config after successful handshake
+      if (handshake) {
+        updateConfigAfterHandshake(handshake, passcode, targetModuleUuid);
+      }
     } catch (e) {
       if (String(e) !== "cancelled") {
         error = String(e);
@@ -199,6 +251,8 @@
   }
 
   async function handleCancel() {
+    intentionalDisconnect = true;
+    autoRelistening = false; // abort any pending auto-relisten (during the 800ms delay)
     try {
       await invoke("cancel_pending_connect");
     } catch (e) {
@@ -207,6 +261,7 @@
   }
 
   async function handleDisconnect() {
+    intentionalDisconnect = true;
     try {
       await invoke("disconnect");
     } catch (e) {
@@ -309,6 +364,81 @@
       unknown: true,
     };
     logLevel = "all";
+  }
+
+  // ── Auto-save filter state (debounced) ────────────────────────────────
+  let _filterSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  $effect(() => {
+    // Track these reactive values
+    searchQuery;
+    kindFilters;
+    logLevel;
+    configLoaded;
+
+    if (!configLoaded) return;
+
+    if (_filterSaveTimer) clearTimeout(_filterSaveTimer);
+    _filterSaveTimer = setTimeout(() => {
+      _filterSaveTimer = null;
+      saveFilterState(searchQuery, kindFilters, logLevel);
+    }, 500);
+
+    return () => {
+      if (_filterSaveTimer) clearTimeout(_filterSaveTimer);
+    };
+  });
+
+  // ── Auto-relisten ─────────────────────────────────────────────────────
+  async function autoRelisten() {
+    if (autoRelistening || connected) return;
+    autoRelistening = true;
+    connecting = true;
+    error = null;
+    disconnected = false;
+
+    try {
+      // Brief delay so UI can settle to "Waiting for MC..."
+      await new Promise((r) => setTimeout(r, 800));
+      if (!autoRelistening || connected) return;
+
+      const targetUuid = targetModuleUuid.trim() || null;
+      const pass = passcode.trim() || null;
+
+      handshake = await invoke<HandshakeInfo>("listen_to_minecraft", {
+        port,
+        targetModuleUuid: targetUuid,
+        passcode: pass,
+      });
+      connected = true;
+
+      // Persist config after successful reconnection
+      if (handshake) {
+        updateConfigAfterHandshake(handshake, passcode, targetModuleUuid);
+      }
+    } catch (e) {
+      if (String(e) !== "cancelled") {
+        error = String(e);
+      }
+      connected = false;
+    } finally {
+      connecting = false;
+      autoRelistening = false;
+    }
+  }
+
+  function updateConfigAfterHandshake(hs: HandshakeInfo, currentPasscode: string, requestedTargetUuid: string) {
+    // Merge incoming plugins by UUID
+    saveKnownPlugins(hs.plugins);
+
+    // Derive the target UUID to persist from what was requested for this connection,
+    // falling back to the sole handshake plugin UUID (auto-selected by the backend).
+    const effectiveUuid = requestedTargetUuid.trim() || (hs.plugins.length === 1 ? hs.plugins[0].module_uuid : null);
+    if (effectiveUuid) {
+      saveLastTargetModuleUuid(effectiveUuid);
+    }
+
+    // Persist current passcode
+    savePasscode(currentPasscode);
   }
 </script>
 
