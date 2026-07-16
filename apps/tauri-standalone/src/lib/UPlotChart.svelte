@@ -42,7 +42,7 @@
       const top = self.cursor.top || 0;
       const cw = self.width || 340;
       tooltipEl.style.left = `${left + 12 > cw - 140 ? left - 140 : left + 12}px`;
-      tooltipEl.style.top = `${Math.max(4, top - 16)}px`;
+      tooltipEl.style.top = "4px";
     };
 
     const merged: any = {

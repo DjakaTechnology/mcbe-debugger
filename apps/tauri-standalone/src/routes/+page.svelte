@@ -320,10 +320,20 @@
     return val.toFixed(1);
   }
 
+  function yAxisLabel(groupName: string): string {
+    const n = groupName.toLowerCase();
+    if (n.includes("memory")) return "↑ bytes";
+    if (n.includes("tick") || n.includes("timing")) return "↑ ms";
+    if (n.includes("entit") || n.includes("count") || n.includes("handle")) return "↑ count";
+    if (n.includes("network") || n.includes("packet")) return "↑ pkts";
+    if (n.includes("chunk")) return "↑ chunks";
+    return "↑ value";
+  }
+
   function makeChartOptions(groupName: string, seriesNames: string[]) {
     const colors = ["#396cd8", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899"];
     return {
-      height: 120,
+      height: 130,
       series: [
         { label: "tick" },
         ...seriesNames.map((name, i) => ({
@@ -334,7 +344,24 @@
         })),
       ],
       scales: { x: { time: false }, y: { auto: true } },
-      axes: [{ show: false }, { size: 45, font: "10px monospace" }],
+      axes: [
+        {
+          show: true,
+          ticks: { show: false },
+          grid: { show: false },
+          values: () => [],
+          label: "→ time",
+          labelFont: "9px ui-sans-serif, sans-serif",
+          size: 18,
+        },
+        {
+          show: true,
+          label: yAxisLabel(groupName),
+          labelFont: "9px ui-sans-serif, sans-serif",
+          size: 50,
+          font: "10px monospace",
+        },
+      ],
       legend: { show: seriesNames.length > 1, live: true, font: "10px monospace" },
       cursor: { show: true, points: { size: 4 } },
     };
