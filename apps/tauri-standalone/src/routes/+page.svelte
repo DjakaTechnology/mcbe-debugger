@@ -293,6 +293,23 @@
   function handleKindToggle(kind: McEvent["kind"]) {
     kindFilters[kind] = !kindFilters[kind];
   }
+
+  function handleResetFilters() {
+    searchQuery = "";
+    kindFilters = {
+      protocol: true,
+      stopped: true,
+      thread: true,
+      print: true,
+      notification: true,
+      stat2: true,
+      profilerCapture: true,
+      schema: true,
+      terminated: true,
+      unknown: true,
+    };
+    logLevel = "all";
+  }
 </script>
 
 <div class="flex h-screen w-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -389,6 +406,7 @@
         onKindToggle={handleKindToggle}
         onLogLevelChange={(l) => (logLevel = l)}
         onClearLog={clearLog}
+        onResetFilters={handleResetFilters}
       />
     {/if}
 

@@ -3,6 +3,7 @@
   import ScrollText from "@lucide/svelte/icons/scroll-text";
   import Search from "@lucide/svelte/icons/search";
   import Trash2 from "@lucide/svelte/icons/trash-2";
+  import Filter from "@lucide/svelte/icons/filter";
   import Server from "@lucide/svelte/icons/server";
   import Pause from "@lucide/svelte/icons/pause";
   import Activity from "@lucide/svelte/icons/activity";
@@ -27,6 +28,7 @@
     onKindToggle,
     onLogLevelChange,
     onClearLog,
+    onResetFilters,
   }: {
     events: McEvent[];
     filteredEvents: McEvent[];
@@ -37,15 +39,37 @@
     onKindToggle: (kind: McEvent["kind"]) => void;
     onLogLevelChange: (level: "all" | 0 | 1 | 2) => void;
     onClearLog: () => void;
+    onResetFilters: () => void;
   } = $props();
 
   let logElement = $state<HTMLDivElement | null>(null);
+  let filterOpen = $state(false);
+  let filterContainer = $state<HTMLDivElement | null>(null);
 
   $effect(() => {
     filteredEvents.length;
     if (logElement) {
       logElement.scrollTop = logElement.scrollHeight;
     }
+  });
+
+  function handleWindowClick(event: MouseEvent) {
+    if (filterOpen && filterContainer && !filterContainer.contains(event.target as Node)) {
+      filterOpen = false;
+    }
+  }
+
+  $effect(() => {
+    window.addEventListener("click", handleWindowClick);
+    return () => window.removeEventListener("click", handleWindowClick);
+  });
+
+  let activeFilterCount = $derived.by(() => {
+    let count = 0;
+    if (searchQuery.trim()) count++;
+    if (Object.values(kindFilters).some((v) => !v)) count++;
+    if (logLevel !== "all") count++;
+    return count;
   });
 
   const iconComponents: Record<string, any> = {
@@ -71,66 +95,109 @@
 
 <div class="flex min-h-0 flex-1 flex-col p-4">
   <section class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-    <div class="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
-      <div class="flex items-center justify-between">
-        <div class="flex items-center gap-2">
-          <ScrollText class="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
-          <h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Event Log</h2>
-        </div>
-        <div class="flex items-center gap-3">
-          <span class="text-xs text-zinc-500 dark:text-zinc-400">{filteredEvents.length} of {events.length} events</span>
+    <div class="flex items-center justify-between border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+      <div class="flex items-center gap-2">
+        <ScrollText class="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+        <h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Event Log</h2>
+      </div>
+      <div class="flex items-center gap-2">
+        <span class="text-xs text-zinc-500 dark:text-zinc-400">{filteredEvents.length} of {events.length} events</span>
+
+        <div bind:this={filterContainer} class="relative">
           <button
             type="button"
-            onclick={onClearLog}
-            disabled={events.length === 0}
-            class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            onclick={() => (filterOpen = !filterOpen)}
+            class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors {activeFilterCount > 0
+              ? 'bg-indigo-50 text-indigo-600 dark:bg-indigo-950/30 dark:text-indigo-400'
+              : 'text-zinc-600 hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'}"
           >
-            <Trash2 class="h-3.5 w-3.5" />
-            Clear
+            <Filter class="h-3.5 w-3.5" />
+            Filter
+            {#if activeFilterCount > 0}
+              <span class="ml-0.5 rounded-full bg-indigo-600 px-1.5 py-0.5 text-[9px] font-semibold text-white dark:bg-indigo-500">{activeFilterCount}</span>
+            {/if}
           </button>
-        </div>
-      </div>
 
-      <div class="flex flex-col gap-2 sm:flex-row">
-        <div class="relative flex-1">
-          <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500" />
-          <input
-            type="text"
-            value={searchQuery}
-            oninput={(e) => onSearchChange(e.currentTarget.value)}
-            placeholder="Search events..."
-            class="w-full rounded-md border border-zinc-300 bg-white py-1.5 pl-8 pr-3 text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-          />
-        </div>
-        <div class="flex rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
-          {#each logLevels as level}
-            <button
-              type="button"
-              onclick={() => onLogLevelChange(level.value as typeof logLevel)}
-              class="px-2.5 py-1 text-[10px] font-semibold uppercase transition-colors {logLevel === level.value
-                ? 'rounded-md bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
-                : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300'}"
+          {#if filterOpen}
+            <div
+              transition:fade={{ duration: 100 }}
+              class="absolute right-0 top-full z-20 mt-1.5 w-80 rounded-xl border border-zinc-200 bg-white p-3 shadow-lg dark:border-zinc-800 dark:bg-zinc-950"
             >
-              {level.label}
-            </button>
-          {/each}
-        </div>
-      </div>
+              <div class="mb-2 border-b border-zinc-100 pb-2 dark:border-zinc-800">
+                <span class="text-xs font-semibold uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Filters</span>
+              </div>
 
-      <div class="flex flex-wrap gap-1.5">
-        {#each kindOrder as kind}
-          {@const Icon = iconComponents[eventIcon(kind)]}
-          <button
-            type="button"
-            onclick={() => onKindToggle(kind)}
-            class="flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-medium uppercase tracking-wide transition-colors {kindFilters[kind]
-              ? 'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/30 dark:text-indigo-300'
-              : 'border-zinc-200 bg-white text-zinc-500 opacity-70 hover:opacity-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500'}"
-          >
-            <Icon class="h-3 w-3 {kindFilters[kind] ? eventColor(kind) : 'text-zinc-400 dark:text-zinc-500'}" />
-            {kind}
-          </button>
-        {/each}
+              <div class="space-y-3">
+                <div class="relative">
+                  <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500" />
+                  <input
+                    type="text"
+                    value={searchQuery}
+                    oninput={(e) => onSearchChange(e.currentTarget.value)}
+                    placeholder="Search events..."
+                    class="w-full rounded-md border border-zinc-300 bg-white py-1.5 pl-8 pr-3 text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+                  />
+                </div>
+
+                <div class="space-y-1.5">
+                  <span class="block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Log level</span>
+                  <div class="flex rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
+                    {#each logLevels as level}
+                      <button
+                        type="button"
+                        onclick={() => onLogLevelChange(level.value as typeof logLevel)}
+                        class="px-2.5 py-1 text-[10px] font-semibold uppercase transition-colors {logLevel === level.value
+                          ? 'rounded-md bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
+                          : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300'}"
+                      >
+                        {level.label}
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+
+                <div class="space-y-1.5">
+                  <span class="block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Event kinds</span>
+                  <div class="flex flex-wrap gap-1.5">
+                    {#each kindOrder as kind}
+                      {@const Icon = iconComponents[eventIcon(kind)]}
+                      <button
+                        type="button"
+                        onclick={() => onKindToggle(kind)}
+                        class="flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-medium uppercase tracking-wide transition-colors {kindFilters[kind]
+                          ? 'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/30 dark:text-indigo-300'
+                          : 'border-zinc-200 bg-white text-zinc-500 opacity-70 hover:opacity-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500'}"
+                      >
+                        <Icon class="h-3 w-3 {kindFilters[kind] ? eventColor(kind) : 'text-zinc-400 dark:text-zinc-500'}" />
+                        {kind}
+                      </button>
+                    {/each}
+                  </div>
+                </div>
+              </div>
+
+              <div class="mt-3 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+                <button
+                  type="button"
+                  onclick={onResetFilters}
+                  class="w-full rounded-md py-1.5 text-xs font-medium text-indigo-600 transition-colors hover:bg-indigo-50 dark:text-indigo-400 dark:hover:bg-indigo-950/30"
+                >
+                  Reset filters
+                </button>
+              </div>
+            </div>
+          {/if}
+        </div>
+
+        <button
+          type="button"
+          onclick={onClearLog}
+          disabled={events.length === 0}
+          class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+        >
+          <Trash2 class="h-3.5 w-3.5" />
+          Clear
+        </button>
       </div>
     </div>
 
