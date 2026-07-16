@@ -37,6 +37,14 @@ async fn cancel_pending_connect(state: tauri::State<'_, mc_tauri::AppState>) -> 
 }
 
 #[tauri::command]
+async fn send_minecraft_command(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    command: String,
+) -> Result<(), String> {
+    mc_tauri::send_minecraft_command(&state, command).await
+}
+
+#[tauri::command]
 async fn get_handshake_info(
     state: tauri::State<'_, mc_tauri::AppState>,
 ) -> Result<Option<mc_tauri::HandshakeInfo>, String> {
@@ -102,6 +110,7 @@ pub fn run() {
             connect_to_minecraft,
             disconnect,
             cancel_pending_connect,
+            send_minecraft_command,
             get_handshake_info,
             pause_thread,
             continue_thread,

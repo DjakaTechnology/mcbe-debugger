@@ -239,6 +239,21 @@ pub async fn cancel_pending_connect(state: &AppState) -> Result<(), String> {
     Ok(())
 }
 
+pub async fn send_minecraft_command(
+    state: &AppState,
+    command: String,
+) -> Result<(), String> {
+    let guard = state.cmd_tx.lock().await;
+    let sender = guard.as_ref().ok_or("not connected")?;
+    sender
+        .send(Command::SendEvent(DebuggerEvent::MinecraftCommand {
+            command,
+            dimension_type: "overworld".to_string(),
+        }))
+        .await
+        .map_err(|e| e.to_string())
+}
+
 async fn spawn_connection(
     state: &AppState,
     app: AppHandle,

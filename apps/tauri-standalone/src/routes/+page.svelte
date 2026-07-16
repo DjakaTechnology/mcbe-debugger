@@ -96,6 +96,9 @@
   let evalExpression = $state("");
   let evalHistory = $state<{ expression: string; result: ResponsePayload }[]>([]);
 
+  let commandInput = $state("");
+  let commandHistory = $state<string[]>([]);
+
   const kindOrder: McEvent["kind"][] = [
     "protocol",
     "stopped",
@@ -243,6 +246,18 @@
   async function handleCancel() {
     try {
       await invoke("cancel_pending_connect");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function handleSendCommand() {
+    const cmd = commandInput.trim();
+    if (!cmd) return;
+    try {
+      await invoke("send_minecraft_command", { command: cmd });
+      commandHistory = [cmd, ...commandHistory.filter((c) => c !== cmd)].slice(0, 8);
+      commandInput = "";
     } catch (e) {
       error = String(e);
     }
@@ -577,6 +592,42 @@
               {/if}
             </div>
           </div>
+         </section>
+      {/if}
+
+      {#if connected}
+        <section class="space-y-3">
+          <div class="flex items-center gap-2">
+            <Terminal class="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
+            <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Commands</h2>
+          </div>
+
+          <form onsubmit={(e) => { e.preventDefault(); handleSendCommand(); }}>
+            <div class="relative">
+              <Terminal class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500" />
+              <input
+                type="text"
+                bind:value={commandInput}
+                placeholder="/say hello"
+                class="w-full rounded-md border border-zinc-300 bg-white py-2 pl-8 pr-3 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+              />
+            </div>
+          </form>
+
+          {#if commandHistory.length > 0}
+            <div class="flex flex-wrap gap-1">
+              {#each commandHistory as cmd, i (i)}
+                <button
+                  type="button"
+                  onclick={() => (commandInput = cmd)}
+                  title={cmd}
+                  class="max-w-full truncate rounded-full border border-zinc-200 bg-white px-2 py-1 font-mono text-[10px] text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                >
+                  {cmd}
+                </button>
+              {/each}
+            </div>
+          {/if}
         </section>
       {/if}
     </div>
