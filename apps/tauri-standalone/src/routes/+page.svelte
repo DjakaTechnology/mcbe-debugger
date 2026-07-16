@@ -320,20 +320,60 @@
     return val.toFixed(1);
   }
 
-  function makeChartOptions(title: string) {
+  function makeChartOptions(groupName: string, seriesNames: string[]) {
+    const colors = ["#396cd8", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899"];
     return {
-      width: 340,
-      height: 100,
+      height: 120,
       series: [
         { label: "tick" },
-        { label: title, stroke: "#396cd8", width: 2, fill: "rgba(57, 108, 216, 0.1)" },
+        ...seriesNames.map((name, i) => ({
+          label: name,
+          stroke: colors[i % colors.length],
+          width: 1.5,
+          fill: seriesNames.length === 1 ? "rgba(57, 108, 216, 0.08)" : undefined,
+        })),
       ],
       scales: { x: { time: false }, y: { auto: true } },
       axes: [{ show: false }, { size: 45, font: "10px monospace" }],
-      legend: { show: false },
-      cursor: { show: false },
+      legend: { show: seriesNames.length > 1, live: true, font: "10px monospace" },
+      cursor: { show: true, points: { size: 4 } },
     };
   }
+
+  function shortName(path: string): string {
+    const parts = path.split(".");
+    return parts.length > 1 ? parts.slice(1).join(".") : parts[0];
+  }
+
+  function buildGroupData(series: StatSeries[]): any[] {
+    if (series.length === 0) return [[], []];
+    const longest = series.reduce((a, b) => (a.ticks.length > b.ticks.length ? a : b));
+    const xTicks = [...longest.ticks];
+    const result: any[] = [xTicks];
+    for (const s of series) {
+      if (s.ticks.length === xTicks.length) {
+        result.push([...s.values]);
+      } else {
+        const tickMap = new Map<number, number>();
+        for (let i = 0; i < s.ticks.length; i++) tickMap.set(s.ticks[i], s.values[i]);
+        result.push(xTicks.map((t) => {
+          const v = tickMap.get(t);
+          return v === undefined ? null : v;
+        }));
+      }
+    }
+    return result;
+  }
+
+  let chartGroups = $derived.by(() => {
+    const groups: Record<string, { name: string; series: StatSeries[] }> = {};
+    for (const series of Object.values(statsCollection)) {
+      const topLevel = series.path.split(".")[0];
+      if (!groups[topLevel]) groups[topLevel] = { name: topLevel, series: [] };
+      groups[topLevel].series.push(series);
+    }
+    return Object.values(groups).sort((a, b) => a.name.localeCompare(b.name));
+  });
 
   async function handleDisconnect() {
     try {
@@ -927,14 +967,22 @@
             </div>
           {:else}
             <div class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));">
-              {#each Object.values(statsCollection) as series (series.path)}
-                {@const lastVal = series.values[series.values.length - 1]}
+              {#each chartGroups as group (group.name)}
+                {@const seriesNames = group.series.map((s) => shortName(s.path))}
+                {@const groupData = buildGroupData(group.series)}
+                {@const lastVal = group.series[0]?.values[group.series[0]?.values.length - 1]}
                 <div class="rounded-lg border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-                  <div class="mb-1.5 flex items-center justify-between">
-                    <span class="truncate text-xs font-semibold text-zinc-700 dark:text-zinc-300">{series.name}</span>
-                    <span class="font-mono text-sm font-bold text-indigo-600 dark:text-indigo-400">{formatStatValue(lastVal)}</span>
+                  <div class="mb-1.5 flex items-center justify-between gap-2">
+                    <span class="truncate text-xs font-semibold text-zinc-700 dark:text-zinc-300">{group.name}</span>
+                    <span class="shrink-0 font-mono text-xs text-zinc-500 dark:text-zinc-400">
+                      {#if group.series.length === 1}
+                        {formatStatValue(lastVal)}
+                      {:else}
+                        {group.series.length} series
+                      {/if}
+                    </span>
                   </div>
-                  <UPlotChart options={makeChartOptions(series.name)} data={[series.ticks, series.values]} />
+                  <UPlotChart options={makeChartOptions(group.name, seriesNames)} data={groupData} />
                 </div>
               {/each}
             </div>
