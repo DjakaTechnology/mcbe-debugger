@@ -62,11 +62,116 @@ pub enum ConnectionError {
     AmbiguousTarget {
         available: Vec<(String, String)>,
     },
+    #[error("selected target_module_uuid \"{selected}\" not found in available plugins: {available:?}")]
+    TargetNotFound {
+        selected: String,
+        available: Vec<(String, String)>,
+    },
     #[error("request timed out after {0:?} (MC may not respond to this command type)")]
     RequestTimeout(std::time::Duration),
 }
 
+/// A partially handshaken connection that has received the initial `ProtocolEvent`
+/// from Minecraft but has not yet validated passcode/target or sent the debugger's
+/// protocol response. Call [`complete`](PendingConnection::complete) to finish the handshake.
+#[derive(Debug)]
+pub struct PendingConnection {
+    conn: DebuggeeConnection,
+    plugins: Vec<PluginDetails>,
+    require_passcode: bool,
+}
+
+impl PendingConnection {
+    /// Metadata extracted from the incoming `ProtocolEvent`.
+    pub fn handshake_info(&self) -> ProtocolHandshake {
+        ProtocolHandshake {
+            version: self.conn.version,
+            plugins: self.plugins.clone(),
+            require_passcode: self.require_passcode,
+        }
+    }
+
+    /// Plugins advertised by Minecraft.
+    pub fn plugins(&self) -> &[PluginDetails] {
+        &self.plugins
+    }
+
+    /// Whether the server requires a passcode.
+    pub fn require_passcode(&self) -> bool {
+        self.require_passcode
+    }
+
+    /// Complete the handshake by validating passcode/target and sending the
+    /// debugger's protocol response. Consumes the pending connection and
+    /// returns a fully operational [`DebuggeeConnection`].
+    pub async fn complete(
+        self,
+        opts: ConnectOptions,
+    ) -> Result<(DebuggeeConnection, ProtocolHandshake), ConnectionError> {
+        let PendingConnection {
+            mut conn,
+            plugins,
+            require_passcode,
+        } = self;
+
+        if require_passcode && opts.passcode.is_none() {
+            return Err(ConnectionError::PasscodeRequired);
+        }
+
+        let target_uuid = match opts.target_module_uuid {
+            Some(uuid) => {
+                // Reject explicit targets not in the plugin list, unless the
+                // list is empty (legacy / diagnostics use).
+                if !plugins.is_empty()
+                    && !plugins.iter().any(|p| p.module_uuid == uuid)
+                {
+                    return Err(ConnectionError::TargetNotFound {
+                        selected: uuid,
+                        available: plugins
+                            .iter()
+                            .map(|p| (p.name.clone(), p.module_uuid.clone()))
+                            .collect(),
+                    });
+                }
+                Some(uuid)
+            }
+            None => {
+                if plugins.len() == 1 {
+                    Some(plugins[0].module_uuid.clone())
+                } else if plugins.len() > 1 {
+                    return Err(ConnectionError::AmbiguousTarget {
+                        available: plugins
+                            .iter()
+                            .map(|p| (p.name.clone(), p.module_uuid.clone()))
+                            .collect(),
+                    });
+                } else {
+                    None
+                }
+            }
+        };
+
+        let version = conn.version;
+        conn.send_event(&DebuggerEvent::Protocol {
+            version: version.as_u8(),
+            target_module_uuid: target_uuid,
+            passcode: opts.passcode,
+        })
+        .await?;
+
+        Ok((
+            conn,
+            ProtocolHandshake {
+                version,
+                plugins,
+                require_passcode,
+            },
+        ))
+    }
+}
+
 impl DebuggeeConnection {
+    /// Connect to Minecraft and complete the full handshake with default options.
     pub async fn connect(
         host: &str,
         port: u16,
@@ -74,33 +179,60 @@ impl DebuggeeConnection {
         Self::connect_with_options(host, port, ConnectOptions::default()).await
     }
 
+    /// Connect to Minecraft with explicit options (equivalent to pending + complete).
     pub async fn connect_with_options(
         host: &str,
         port: u16,
         opts: ConnectOptions,
     ) -> Result<(Self, ProtocolHandshake), ConnectionError> {
-        let stream = TcpStream::connect((host, port)).await?;
-        Self::handshake(stream, opts).await
+        let pending = Self::connect_pending(host, port).await?;
+        pending.complete(opts).await
     }
 
+    /// Listen for an incoming Minecraft debugger connection and complete
+    /// the full handshake with default options.
     pub async fn listen(port: u16) -> Result<(Self, ProtocolHandshake), ConnectionError> {
         Self::listen_with_options(port, ConnectOptions::default()).await
     }
 
+    /// Listen with explicit options (equivalent to pending + complete).
     pub async fn listen_with_options(
         port: u16,
         opts: ConnectOptions,
     ) -> Result<(Self, ProtocolHandshake), ConnectionError> {
+        let pending = Self::listen_pending(port).await?;
+        pending.complete(opts).await
+    }
+
+    // ── Pending (two-phase) handshake API ───────────────────────────────
+
+    /// Connect to Minecraft but stop after receiving the `ProtocolEvent`.
+    /// Does **not** validate passcode/target or send the debugger's protocol response.
+    /// Call [`PendingConnection::complete`] to finish the handshake.
+    pub async fn connect_pending(
+        host: &str,
+        port: u16,
+    ) -> Result<PendingConnection, ConnectionError> {
+        let stream = TcpStream::connect((host, port)).await?;
+        Self::handshake_pending(stream).await
+    }
+
+    /// Accept an incoming Minecraft debugger connection but stop after
+    /// receiving the `ProtocolEvent`.  Does **not** validate passcode/target
+    /// or send the debugger's protocol response.
+    /// Call [`PendingConnection::complete`] to finish the handshake.
+    pub async fn listen_pending(port: u16) -> Result<PendingConnection, ConnectionError> {
         let listener = TcpListener::bind(("127.0.0.1", port)).await?;
         let (stream, _) = listener.accept().await?;
         drop(listener);
-        Self::handshake(stream, opts).await
+        Self::handshake_pending(stream).await
     }
 
-    async fn handshake(
+    /// Internal: read the initial `ProtocolEvent` and set up the connection
+    /// without validating passcode/target or sending the protocol response.
+    async fn handshake_pending(
         stream: TcpStream,
-        opts: ConnectOptions,
-    ) -> Result<(Self, ProtocolHandshake), ConnectionError> {
+    ) -> Result<PendingConnection, ConnectionError> {
         let mut conn = Self {
             stream,
             codec: MessageCodec::new(),
@@ -136,41 +268,11 @@ impl DebuggeeConnection {
         })?;
         conn.version = negotiated;
 
-        if require_passcode && opts.passcode.is_none() {
-            return Err(ConnectionError::PasscodeRequired);
-        }
-
-        let target_uuid = opts.target_module_uuid.or_else(|| {
-            if plugins.len() == 1 {
-                Some(plugins[0].module_uuid.clone())
-            } else {
-                None
-            }
-        });
-        if plugins.len() > 1 && target_uuid.is_none() {
-            return Err(ConnectionError::AmbiguousTarget {
-                available: plugins
-                    .iter()
-                    .map(|p| (p.name.clone(), p.module_uuid.clone()))
-                    .collect(),
-            });
-        }
-
-        conn.send_event(&DebuggerEvent::Protocol {
-            version: negotiated.as_u8(),
-            target_module_uuid: target_uuid,
-            passcode: opts.passcode,
-        })
-        .await?;
-
-        Ok((
+        Ok(PendingConnection {
             conn,
-            ProtocolHandshake {
-                version: negotiated,
-                plugins,
-                require_passcode,
-            },
-        ))
+            plugins,
+            require_passcode,
+        })
     }
 
     pub async fn send_event(
@@ -947,6 +1049,303 @@ mod tests {
             DebuggeeEvent::DebuggeeResponse { request_seq: 99999, .. } => {}
             other => panic!("expected stray DebuggeeResponse(99999), got {other:?}"),
         }
+
+        let _ = tokio::time::timeout(TEST_TIMEOUT, server).await;
+    }
+
+    // ── PendingConnection tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pending_single_plugin_auto_selects() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "ProtocolEvent",
+                    "version": 9,
+                    "plugins": [{"name": "bp.main", "module_uuid": "abc-123"}],
+                    "require_passcode": false
+                }),
+            )
+            .await;
+            let mut codec = MessageCodec::new();
+            let mut buf = BytesMut::new();
+            recv_frame(&mut sock, &mut codec, &mut buf).await
+        });
+
+        let pending = tokio::time::timeout(
+            TEST_TIMEOUT,
+            DebuggeeConnection::connect_pending("127.0.0.1", port),
+        )
+        .await
+        .expect("pending connect timed out")
+        .expect("pending connect failed");
+
+        assert_eq!(pending.plugins().len(), 1);
+        assert_eq!(pending.plugins()[0].module_uuid, "abc-123");
+        assert!(!pending.require_passcode());
+
+        let (_conn, hs) = tokio::time::timeout(
+            TEST_TIMEOUT,
+            pending.complete(ConnectOptions::default()),
+        )
+        .await
+        .expect("complete timed out")
+        .expect("complete failed");
+
+        assert_eq!(hs.plugins.len(), 1);
+
+        let server_response = tokio::time::timeout(TEST_TIMEOUT, server)
+            .await
+            .expect("server timed out")
+            .expect("server task panicked");
+        assert_eq!(server_response["type"], "protocol");
+        assert_eq!(server_response["target_module_uuid"], "abc-123");
+    }
+
+    #[tokio::test]
+    async fn pending_explicit_target_overrides_auto() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "ProtocolEvent",
+                    "version": 9,
+                    "plugins": [
+                        {"name": "bp.one", "module_uuid": "uuid-1"},
+                        {"name": "bp.two", "module_uuid": "uuid-2"}
+                    ],
+                    "require_passcode": false
+                }),
+            )
+            .await;
+            let mut codec = MessageCodec::new();
+            let mut buf = BytesMut::new();
+            recv_frame(&mut sock, &mut codec, &mut buf).await
+        });
+
+        let pending = DebuggeeConnection::connect_pending("127.0.0.1", port)
+            .await
+            .expect("pending connect failed");
+
+        let (_conn, _hs) = pending
+            .complete(ConnectOptions {
+                target_module_uuid: Some("uuid-2".into()),
+                passcode: None,
+            })
+            .await
+            .expect("complete failed");
+
+        let server_response = tokio::time::timeout(TEST_TIMEOUT, server)
+            .await
+            .expect("server timed out")
+            .expect("server task panicked");
+        assert_eq!(server_response["target_module_uuid"], "uuid-2");
+    }
+
+    #[tokio::test]
+    async fn pending_multiple_no_target_gives_ambiguous() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "ProtocolEvent",
+                    "version": 9,
+                    "plugins": [
+                        {"name": "bp.a", "module_uuid": "u1"},
+                        {"name": "bp.b", "module_uuid": "u2"}
+                    ],
+                    "require_passcode": false
+                }),
+            )
+            .await;
+            let _ = sock.read(&mut [0u8; 16]).await;
+        });
+
+        let pending = DebuggeeConnection::connect_pending("127.0.0.1", port)
+            .await
+            .expect("pending connect failed");
+
+        let result = tokio::time::timeout(
+            TEST_TIMEOUT,
+            pending.complete(ConnectOptions::default()),
+        )
+        .await
+        .expect("complete timed out");
+
+        match result {
+            Err(ConnectionError::AmbiguousTarget { available }) => {
+                assert_eq!(available.len(), 2);
+            }
+            other => panic!("expected AmbiguousTarget, got {other:?}"),
+        }
+
+        let _ = tokio::time::timeout(TEST_TIMEOUT, server).await;
+    }
+
+    #[tokio::test]
+    async fn pending_explicit_target_not_found_rejected() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "ProtocolEvent",
+                    "version": 9,
+                    "plugins": [{"name": "bp.one", "module_uuid": "uuid-1"}],
+                    "require_passcode": false
+                }),
+            )
+            .await;
+            let _ = sock.read(&mut [0u8; 16]).await;
+        });
+
+        let pending = DebuggeeConnection::connect_pending("127.0.0.1", port)
+            .await
+            .expect("pending connect failed");
+
+        let result = pending
+            .complete(ConnectOptions {
+                target_module_uuid: Some("nonexistent".into()),
+                passcode: None,
+            })
+            .await;
+
+        match result {
+            Err(ConnectionError::TargetNotFound { selected, available }) => {
+                assert_eq!(selected, "nonexistent");
+                assert_eq!(available.len(), 1);
+                assert_eq!(available[0].1, "uuid-1");
+            }
+            other => panic!("expected TargetNotFound, got {other:?}"),
+        }
+
+        let _ = tokio::time::timeout(TEST_TIMEOUT, server).await;
+    }
+
+    #[tokio::test]
+    async fn pending_empty_plugins_allows_explicit_target() {
+        // Legacy / diagnostics: explicit target is allowed even when
+        // Minecraft reports zero plugins.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "ProtocolEvent",
+                    "version": 9,
+                    "plugins": [],
+                    "require_passcode": false
+                }),
+            )
+            .await;
+            let mut codec = MessageCodec::new();
+            let mut buf = BytesMut::new();
+            recv_frame(&mut sock, &mut codec, &mut buf).await
+        });
+
+        let pending = DebuggeeConnection::connect_pending("127.0.0.1", port)
+            .await
+            .expect("pending connect failed");
+
+        let (_conn, _hs) = pending
+            .complete(ConnectOptions {
+                target_module_uuid: Some("legacy-uuid".into()),
+                passcode: None,
+            })
+            .await
+            .expect("complete should allow explicit target on empty plugins");
+
+        let server_response = tokio::time::timeout(TEST_TIMEOUT, server)
+            .await
+            .expect("server timed out")
+            .expect("server task panicked");
+        assert_eq!(server_response["target_module_uuid"], "legacy-uuid");
+    }
+
+    #[tokio::test]
+    async fn pending_listen_works() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            let mut sock = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "ProtocolEvent",
+                    "version": 9,
+                    "plugins": [{"name": "bp.x", "module_uuid": "xxx"}],
+                    "require_passcode": false
+                }),
+            )
+            .await;
+            let mut codec = MessageCodec::new();
+            let mut buf = BytesMut::new();
+            recv_frame(&mut sock, &mut codec, &mut buf).await
+        });
+
+        let pending = DebuggeeConnection::listen_pending(port)
+            .await
+            .expect("listen pending failed");
+        assert_eq!(pending.plugins().len(), 1);
+
+        let (_conn, _hs) = pending.complete(ConnectOptions::default()).await.unwrap();
+
+        let server_response = tokio::time::timeout(TEST_TIMEOUT, server)
+            .await
+            .expect("server timed out")
+            .expect("server task panicked");
+        assert_eq!(server_response["target_module_uuid"], "xxx");
+    }
+
+    #[tokio::test]
+    async fn existing_wrapper_behavior_unchanged() {
+        // Sanity check that the old convenience APIs still work identically.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            send_frame(
+                &mut sock,
+                serde_json::json!({
+                    "type": "ProtocolEvent",
+                    "version": 9,
+                    "plugins": [],
+                    "require_passcode": false
+                }),
+            )
+            .await;
+            let mut codec = MessageCodec::new();
+            let mut buf = BytesMut::new();
+            recv_frame(&mut sock, &mut codec, &mut buf).await
+        });
+
+        let (_conn, hs) = DebuggeeConnection::connect("127.0.0.1", port)
+            .await
+            .expect("connect failed");
+        assert_eq!(hs.version, ProtocolVersion::CURRENT);
 
         let _ = tokio::time::timeout(TEST_TIMEOUT, server).await;
     }

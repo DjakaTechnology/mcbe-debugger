@@ -37,6 +37,14 @@ async fn cancel_pending_connect(state: tauri::State<'_, mc_tauri::AppState>) -> 
 }
 
 #[tauri::command]
+async fn select_target_module(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    module_uuid: String,
+) -> Result<(), String> {
+    mc_tauri::select_target_module(&state, module_uuid).await
+}
+
+#[tauri::command]
 async fn send_minecraft_command(
     state: tauri::State<'_, mc_tauri::AppState>,
     command: String,
@@ -111,6 +119,7 @@ pub fn run() {
             connect_to_minecraft,
             disconnect,
             cancel_pending_connect,
+            select_target_module,
             send_minecraft_command,
             get_handshake_info,
             pause_thread,

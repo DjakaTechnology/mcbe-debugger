@@ -10,7 +10,7 @@
   import ScrollText from "@lucide/svelte/icons/scroll-text";
   import BarChart3 from "@lucide/svelte/icons/bar-chart-3";
 
-  import type { McEvent, HandshakeInfo, ResponsePayload, StatSeries } from "$lib/types.js";
+  import type { McEvent, HandshakeInfo, ResponsePayload, StatSeries, PluginInfo } from "$lib/types.js";
   import { accumulateStats, buildChartGroups, buildCategorizedGroups, buildClientIds, kindOrder } from "$lib/stats.js";
   import { formatEvent } from "$lib/events.js";
   import {
@@ -26,6 +26,7 @@
   import EventLogPanel from "$lib/components/EventLogPanel.svelte";
   import StatsPanel from "$lib/components/StatsPanel.svelte";
   import EvaluatePanel from "$lib/components/EvaluatePanel.svelte";
+  import TargetSelectionModal from "$lib/components/TargetSelectionModal.svelte";
 
   let mode = $state<"listen" | "connect">("listen");
   let host = $state("127.0.0.1");
@@ -79,6 +80,11 @@
 
   let activeStatsCategory = $state<string>("all");
   let selectedClient = $state<string | "all">("all");
+
+  // ── Target selection modal state ─────────────────────────────────────
+  let targetSelectionPlugins = $state<PluginInfo[] | null>(null);
+  let selectingTarget = $state(false);
+  let targetSelectionError = $state<string | null>(null);
 
   let filteredEvents = $derived.by(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -170,6 +176,13 @@
           stopReason = "";
         }
       }),
+      listen<PluginInfo[]>("mc-target-selection-required", (e) => {
+        // Ignore stale queued events after the user cancelled or disconnected
+        if (!connecting) return;
+        targetSelectionPlugins = e.payload;
+        selectingTarget = false;
+        targetSelectionError = null;
+      }),
       listen("mc-disconnected", () => {
         disconnected = true;
         connected = false;
@@ -177,6 +190,7 @@
         stopped = false;
         stoppedThreadId = null;
         stopReason = "";
+        targetSelectionError = null;
         // Auto-relisten if this was a listen-mode session not torn down by user
         if (!intentionalDisconnect && wasListenMode && !autoRelistening) {
           autoRelisten();
@@ -190,6 +204,7 @@
         stopped = false;
         stoppedThreadId = null;
         stopReason = "";
+        targetSelectionError = null;
         if (!intentionalDisconnect && wasListenMode && !autoRelistening) {
           autoRelisten();
         }
@@ -214,6 +229,7 @@
   async function handleConnect() {
     connecting = true;
     error = null;
+    targetSelectionError = null;
     disconnected = false;
     intentionalDisconnect = false;
     wasListenMode = mode === "listen";
@@ -235,6 +251,7 @@
         });
       }
       connected = true;
+      targetSelectionPlugins = null;
 
       // Persist config after successful handshake
       if (handshake) {
@@ -245,6 +262,7 @@
         error = String(e);
       }
       connected = false;
+      targetSelectionPlugins = null;
     } finally {
       connecting = false;
     }
@@ -253,6 +271,9 @@
   async function handleCancel() {
     intentionalDisconnect = true;
     autoRelistening = false; // abort any pending auto-relisten (during the 800ms delay)
+    targetSelectionPlugins = null;
+    selectingTarget = false;
+    targetSelectionError = null;
     try {
       await invoke("cancel_pending_connect");
     } catch (e) {
@@ -272,6 +293,9 @@
       stopped = false;
       stoppedThreadId = null;
       stopReason = "";
+      targetSelectionPlugins = null;
+      selectingTarget = false;
+      targetSelectionError = null;
     }
   }
 
@@ -366,6 +390,29 @@
     logLevel = "all";
   }
 
+  async function handleSelectTarget(plugin: PluginInfo) {
+    selectingTarget = true;
+    error = null;
+    targetSelectionError = null;
+    targetModuleUuid = plugin.module_uuid;
+    try {
+      await invoke("select_target_module", { moduleUuid: plugin.module_uuid });
+      targetSelectionPlugins = null;
+      targetSelectionError = null;
+    } catch (e) {
+      error = String(e);
+      targetSelectionError = String(e);
+      selectingTarget = false;
+    }
+  }
+
+  function handleCancelTargetSelection() {
+    targetSelectionPlugins = null;
+    selectingTarget = false;
+    targetSelectionError = null;
+    handleCancel();
+  }
+
   // ── Auto-save filter state (debounced) ────────────────────────────────
   let _filterSaveTimer: ReturnType<typeof setTimeout> | null = null;
   $effect(() => {
@@ -394,6 +441,7 @@
     autoRelistening = true;
     connecting = true;
     error = null;
+    targetSelectionError = null;
     disconnected = false;
 
     try {
@@ -410,6 +458,7 @@
         passcode: pass,
       });
       connected = true;
+      targetSelectionPlugins = null;
 
       // Persist config after successful reconnection
       if (handshake) {
@@ -420,9 +469,12 @@
         error = String(e);
       }
       connected = false;
+      targetSelectionPlugins = null;
     } finally {
       connecting = false;
       autoRelistening = false;
+      selectingTarget = false;
+      targetSelectionError = null;
     }
   }
 
@@ -561,4 +613,14 @@
       />
     {/if}
   </main>
+
+  {#if targetSelectionPlugins}
+    <TargetSelectionModal
+      plugins={targetSelectionPlugins}
+      selecting={selectingTarget}
+      selectionError={targetSelectionError}
+      onSelect={handleSelectTarget}
+      onCancel={handleCancelTargetSelection}
+    />
+  {/if}
 </div>

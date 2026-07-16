@@ -2198,11 +2198,13 @@ dependencies = [
 name = "mc-tauri"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "mc-protocol",
  "serde",
  "serde_json",
  "tauri",
  "tokio",
+ "tokio-util",
 ]
 
 [[package]]
