@@ -6,7 +6,8 @@
   let el = $state<HTMLDivElement>();
   let tooltipEl = $state<HTMLDivElement>();
   let chart: uPlot | null = null;
-  let frozen = $state(false);
+  let lastCursorLeft = $state<number | null>(null);
+  let mouseInside = $state(false);
 
   $effect(() => {
     if (!el) return;
@@ -18,6 +19,7 @@
         tooltipEl.style.display = "none";
         return;
       }
+      lastCursorLeft = self.cursor.left ?? null;
       const xVal = self.data[0]?.[idx];
       let html = `<div style="opacity:0.5">tick ${xVal ?? ""}</div>`;
       for (let i = 1; i < self.data.length; i++) {
@@ -41,7 +43,6 @@
       tooltipEl.innerHTML = html;
       tooltipEl.style.display = "block";
       const left = self.cursor.left || 0;
-      const top = self.cursor.top || 0;
       const cw = self.width || 340;
       tooltipEl.style.left = `${left + 12 > cw - 140 ? left - 140 : left + 12}px`;
       tooltipEl.style.top = "4px";
@@ -73,8 +74,11 @@
   });
 
   $effect(() => {
-    if (chart && data && !frozen) {
+    if (chart && data) {
       chart.setData(data);
+      if (lastCursorLeft !== null && mouseInside) {
+        chart.setCursor({ left: lastCursorLeft, top: 0 });
+      }
     }
   });
 </script>
@@ -82,20 +86,14 @@
 <div
   role="img"
   class="relative w-full"
-  onmouseenter={() => (frozen = true)}
+  onmouseenter={() => (mouseInside = true)}
   onmouseleave={() => {
-    frozen = false;
+    mouseInside = false;
+    lastCursorLeft = null;
     if (tooltipEl) tooltipEl.style.display = "none";
   }}
 >
   <div bind:this={el}></div>
-  {#if frozen}
-    <div
-      class="pointer-events-none absolute right-2 top-2 rounded bg-zinc-900/60 px-1.5 py-0.5 text-[9px] font-medium text-zinc-300 backdrop-blur-sm"
-    >
-      Frozen
-    </div>
-  {/if}
   <div
     bind:this={tooltipEl}
     class="pointer-events-none absolute z-10 hidden rounded-md bg-zinc-900/90 px-2 py-1.5 text-[10px] font-mono leading-relaxed text-zinc-100 shadow-lg ring-1 ring-white/10 dark:bg-zinc-800/95"

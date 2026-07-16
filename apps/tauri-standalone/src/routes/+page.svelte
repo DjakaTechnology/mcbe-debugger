@@ -2,72 +2,23 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
-  import { slide, fly, fade } from "svelte/transition";
-  import { cubicOut } from "svelte/easing";
 
-  import Bug from "@lucide/svelte/icons/bug";
-  import RadioTower from "@lucide/svelte/icons/radio-tower";
-  import PlugZap from "@lucide/svelte/icons/plug-zap";
-  import Play from "@lucide/svelte/icons/play";
-  import Square from "@lucide/svelte/icons/square";
-  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
-  import Server from "@lucide/svelte/icons/server";
-  import ScrollText from "@lucide/svelte/icons/scroll-text";
-  import ChevronDown from "@lucide/svelte/icons/chevron-down";
-  import ChevronRight from "@lucide/svelte/icons/chevron-right";
-  import Trash2 from "@lucide/svelte/icons/trash-2";
-  import AlertCircle from "@lucide/svelte/icons/alert-circle";
-  import Activity from "@lucide/svelte/icons/activity";
-  import Terminal from "@lucide/svelte/icons/terminal";
-  import Bell from "@lucide/svelte/icons/bell";
-  import BarChart3 from "@lucide/svelte/icons/bar-chart-3";
-  import Timer from "@lucide/svelte/icons/timer";
-  import Layers from "@lucide/svelte/icons/layers";
-  import HelpCircle from "@lucide/svelte/icons/help-circle";
   import Wifi from "@lucide/svelte/icons/wifi";
   import WifiOff from "@lucide/svelte/icons/wifi-off";
-  import Pause from "@lucide/svelte/icons/pause";
-  import Search from "@lucide/svelte/icons/search";
-  import SkipForward from "@lucide/svelte/icons/skip-forward";
-  import CornerDownRight from "@lucide/svelte/icons/corner-down-right";
-  import CornerUpRight from "@lucide/svelte/icons/corner-up-right";
-  import Send from "@lucide/svelte/icons/send";
-  import Gauge from "@lucide/svelte/icons/gauge";
-  import MemoryStick from "@lucide/svelte/icons/memory-stick";
-  import Code from "@lucide/svelte/icons/code";
-  import Monitor from "@lucide/svelte/icons/monitor";
-  import UPlotChart from "$lib/UPlotChart.svelte";
+  import LoaderCircle from "@lucide/svelte/icons/loader-circle";
+  import Activity from "@lucide/svelte/icons/activity";
+  import ScrollText from "@lucide/svelte/icons/scroll-text";
+  import BarChart3 from "@lucide/svelte/icons/bar-chart-3";
 
-  type PluginInfo = { name: string; module_uuid: string };
-  type HandshakeInfo = {
-    version: number;
-    plugins: PluginInfo[];
-    requirePasscode: boolean;
-  };
-  type StatDataModel = {
-    name: string;
-    children?: StatDataModel[];
-    values?: unknown[];
-    should_aggregate?: boolean;
-  };
+  import type { McEvent, HandshakeInfo, ResponsePayload, StatSeries } from "$lib/types.js";
+  import { accumulateStats, buildChartGroups, buildCategorizedGroups, buildClientIds, kindOrder } from "$lib/stats.js";
+  import { formatEvent } from "$lib/events.js";
 
-  type McEvent =
-    | { kind: "protocol"; version: number; plugins: PluginInfo[]; requirePasscode: boolean }
-    | { kind: "stopped"; reason: string; thread: number }
-    | { kind: "thread"; reason: string; thread: number }
-    | { kind: "print"; message: string; logLevel: number }
-    | { kind: "notification"; message: string; logLevel: number }
-    | { kind: "stat2"; tick: number; stats: StatDataModel[] }
-    | { kind: "profilerCapture"; captureBasePath: string }
-    | { kind: "schema"; count: number }
-    | { kind: "terminated"; reason: string | null }
-    | { kind: "unknown"; typeName: string };
-
-  type ResponsePayload = {
-    success: boolean;
-    args?: unknown;
-    message?: string;
-  };
+  import Sidebar from "$lib/components/Sidebar.svelte";
+  import DebugControls from "$lib/components/DebugControls.svelte";
+  import EventLogPanel from "$lib/components/EventLogPanel.svelte";
+  import StatsPanel from "$lib/components/StatsPanel.svelte";
+  import EvaluatePanel from "$lib/components/EvaluatePanel.svelte";
 
   let mode = $state<"listen" | "connect">("listen");
   let host = $state("127.0.0.1");
@@ -82,7 +33,6 @@
   let handshake = $state<HandshakeInfo | null>(null);
   let error = $state<string | null>(null);
   let events = $state<McEvent[]>([]);
-  let logElement = $state<HTMLDivElement | null>(null);
 
   let stopped = $state(false);
   let stoppedThreadId = $state<number | null>(null);
@@ -112,29 +62,8 @@
 
   let activeTab = $state<"log" | "stats">("log");
 
-  type StatSeries = { name: string; path: string; ticks: number[]; values: number[] };
   let statsCollection = $state<Record<string, StatSeries>>({});
 
-  type StatCategory = { key: string; label: string; icon: typeof Activity; groups: { name: string; series: StatSeries[] }[] };
-  const statCategoryMap: Record<string, string> = {
-    server_tick_timings: "server-performance",
-    entities: "server-performance",
-    chunks: "server-performance",
-    networking: "server-performance",
-    app_memory: "memory",
-    dynamic_property_values: "memory",
-    handle_counts: "scripting",
-    fine_grained_subscribers: "scripting",
-    client_stats: "client",
-  };
-  const statCategoryOrder = ["server-performance", "memory", "scripting", "client", "uncategorized"];
-  const statCategoryMeta: Record<string, { label: string; icon: typeof Activity }> = {
-    "server-performance": { label: "Server Performance", icon: Gauge },
-    memory: { label: "Memory", icon: MemoryStick },
-    scripting: { label: "Scripting", icon: Code },
-    client: { label: "Client", icon: Monitor },
-    uncategorized: { label: "Uncategorized", icon: HelpCircle },
-  };
   let expandedCategories = $state<Record<string, boolean>>({
     "server-performance": true,
     memory: true,
@@ -143,34 +72,6 @@
     uncategorized: true,
   });
   let selectedClient = $state<string | "all">("all");
-
-  function getClientId(path: string): string | null {
-    const parts = path.split(".");
-    if (parts.length < 3 || parts[0] !== "client_stats") return null;
-    return parts[1];
-  }
-
-  let clientIds = $derived.by(() => {
-    const ids = new Set<string>();
-    for (const series of Object.values(statsCollection)) {
-      const clientId = getClientId(series.path);
-      if (clientId) ids.add(clientId);
-    }
-    return Array.from(ids).sort();
-  });
-
-  const kindOrder: McEvent["kind"][] = [
-    "protocol",
-    "stopped",
-    "thread",
-    "print",
-    "notification",
-    "stat2",
-    "profilerCapture",
-    "schema",
-    "terminated",
-    "unknown",
-  ];
 
   let filteredEvents = $derived.by(() => {
     const query = searchQuery.trim().toLowerCase();
@@ -217,6 +118,10 @@
     };
   });
 
+  let chartGroups = $derived.by(() => buildChartGroups(statsCollection));
+  let categorizedGroups = $derived.by(() => buildCategorizedGroups(chartGroups));
+  let clientIds = $derived.by(() => buildClientIds(statsCollection));
+
   onMount(() => {
     let unlistens: Array<() => void> = [];
     let cancelled = false;
@@ -225,7 +130,7 @@
       listen<McEvent>("mc-event", (e) => {
         events = [...events, e.payload].slice(-500);
         if (e.payload.kind === "stat2") {
-          accumulateStats(e.payload.stats, e.payload.tick);
+          statsCollection = accumulateStats(statsCollection, e.payload.stats, e.payload.tick);
         }
         if (e.payload.kind === "stopped") {
           stopped = true;
@@ -265,13 +170,6 @@
       cancelled = true;
       unlistens.forEach((ul) => ul());
     };
-  });
-
-  $effect(() => {
-    filteredEvents.length;
-    if (logElement) {
-      logElement.scrollTop = logElement.scrollHeight;
-    }
   });
 
   async function handleConnect() {
@@ -314,196 +212,6 @@
     }
   }
 
-  async function handleSendCommand() {
-    const cmd = commandInput.trim();
-    if (!cmd) return;
-    try {
-      await invoke("send_minecraft_command", { command: cmd });
-      commandHistory = [cmd, ...commandHistory.filter((c) => c !== cmd)].slice(0, 8);
-      commandInput = "";
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  function extractLastNumber(values: unknown[] | undefined): number | null {
-    if (!values || values.length === 0) return null;
-    const last = values[values.length - 1];
-    if (typeof last === "number") return last;
-    if (typeof last === "string") {
-      const n = parseFloat(last);
-      return isNaN(n) ? null : n;
-    }
-    return null;
-  }
-
-  function accumulateStats(stats: StatDataModel[], tick: number, prefix = "") {
-    for (const stat of stats) {
-      const path = prefix ? `${prefix}.${stat.name}` : stat.name;
-      const value = extractLastNumber(stat.values);
-      if (value !== null) {
-        if (!statsCollection[path]) {
-          statsCollection[path] = { name: path, path, ticks: [], values: [] };
-        }
-        const s = statsCollection[path];
-        s.ticks.push(tick);
-        s.values.push(value);
-        if (s.ticks.length > 300) {
-          s.ticks.shift();
-          s.values.shift();
-        }
-      }
-      if (stat.children) {
-        accumulateStats(stat.children, tick, path);
-      }
-    }
-    statsCollection = { ...statsCollection };
-  }
-
-  function formatStatValue(val: number | undefined): string {
-    if (val === undefined) return "—";
-    if (Math.abs(val) >= 1e9) return (val / 1e9).toFixed(2) + "B";
-    if (Math.abs(val) >= 1e6) return (val / 1e6).toFixed(2) + "M";
-    if (Math.abs(val) >= 1e3) return (val / 1e3).toFixed(1) + "K";
-    return val.toFixed(1);
-  }
-
-  function isMemoryGroup(groupName: string): boolean {
-    return groupName.toLowerCase().includes("memory");
-  }
-
-  function formatMemoryValue(mb: number): string {
-    return mb.toFixed(2) + " MB";
-  }
-
-  function formatGroupValue(groupName: string, val: number | undefined): string {
-    if (val === undefined) return "—";
-    if (isMemoryGroup(groupName)) return formatMemoryValue(val / 1048576);
-    return formatStatValue(val);
-  }
-
-  function isEmptySeries(series: StatSeries): boolean {
-    return !series.values.some((v) => v !== null && v !== undefined && v !== 0);
-  }
-
-  function scaleSeriesForDisplay(series: StatSeries, groupName: string): StatSeries {
-    if (!isMemoryGroup(groupName)) return series;
-    return {
-      ...series,
-      values: series.values.map((v) => v / 1048576),
-    };
-  }
-
-  function yAxisLabel(groupName: string): string {
-    const n = groupName.toLowerCase();
-    if (n.includes("memory")) return "↑ MB";
-    if (n.includes("tick") || n.includes("timing")) return "↑ ms";
-    if (n.includes("entit") || n.includes("count") || n.includes("handle")) return "↑ count";
-    if (n.includes("network") || n.includes("packet")) return "↑ pkts";
-    if (n.includes("chunk")) return "↑ chunks";
-    return "↑ value";
-  }
-
-  function makeChartOptions(groupName: string, seriesNames: string[]) {
-    const colors = ["#396cd8", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4", "#ec4899"];
-    const theme = chartThemeColors();
-    return {
-      height: 140,
-      series: [
-        { label: "tick" },
-        ...seriesNames.map((name, i) => ({
-          label: name,
-          stroke: colors[i % colors.length],
-          width: 1.5,
-          fill: seriesNames.length === 1 ? theme.fill : undefined,
-        })),
-      ],
-      scales: { x: { time: false }, y: { auto: true } },
-      axes: [
-        {
-          show: true,
-          ticks: { show: false },
-          grid: { show: false },
-          values: () => [],
-          label: "→ time",
-          labelFont: "9px ui-sans-serif, sans-serif",
-          size: 18,
-          stroke: theme.text,
-          labelColor: theme.text,
-        },
-        {
-          show: true,
-          label: yAxisLabel(groupName),
-          labelFont: "9px ui-sans-serif, sans-serif",
-          size: 50,
-          font: "10px monospace",
-          stroke: theme.text,
-          labelColor: theme.text,
-          grid: { stroke: theme.grid, width: 1 },
-        },
-      ],
-      legend: { show: seriesNames.length > 1, live: true, font: "10px monospace" },
-      cursor: { show: true, points: { size: 4 } },
-    };
-  }
-
-  function shortName(path: string): string {
-    const parts = path.split(".");
-    return parts.length > 1 ? parts.slice(1).join(".") : parts[0];
-  }
-
-  function buildGroupData(series: StatSeries[]): any[] {
-    if (series.length === 0) return [[], []];
-    const longest = series.reduce((a, b) => (a.ticks.length > b.ticks.length ? a : b));
-    const xTicks = [...longest.ticks];
-    const result: any[] = [xTicks];
-    for (const s of series) {
-      if (s.ticks.length === xTicks.length) {
-        result.push([...s.values]);
-      } else {
-        const tickMap = new Map<number, number>();
-        for (let i = 0; i < s.ticks.length; i++) tickMap.set(s.ticks[i], s.values[i]);
-        result.push(xTicks.map((t) => {
-          const v = tickMap.get(t);
-          return v === undefined ? null : v;
-        }));
-      }
-    }
-    return result;
-  }
-
-  let chartGroups = $derived.by(() => {
-    const groups: Record<string, { name: string; series: StatSeries[] }> = {};
-    for (const series of Object.values(statsCollection)) {
-      const topLevel = series.path.split(".")[0];
-      if (!groups[topLevel]) groups[topLevel] = { name: topLevel, series: [] };
-      groups[topLevel].series.push(series);
-    }
-    return Object.values(groups).sort((a, b) => a.name.localeCompare(b.name));
-  });
-
-  let categorizedGroups = $derived.by(() => {
-    const categories: Record<string, StatCategory> = {};
-    for (const key of statCategoryOrder) {
-      const meta = statCategoryMeta[key];
-      categories[key] = { key, label: meta.label, icon: meta.icon, groups: [] };
-    }
-    for (const group of chartGroups) {
-      const categoryKey = statCategoryMap[group.name] ?? "uncategorized";
-      categories[categoryKey].groups.push(group);
-    }
-    return Object.values(categories).filter((cat) => cat.groups.length > 0);
-  });
-
-  function chartThemeColors() {
-    const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-    return {
-      text: isDark ? "#a1a1aa" : "#71717a",
-      grid: isDark ? "#27272a" : "#e4e4e7",
-      fill: isDark ? "rgba(57, 108, 216, 0.15)" : "rgba(57, 108, 216, 0.08)",
-    };
-  }
-
   async function handleDisconnect() {
     try {
       await invoke("disconnect");
@@ -515,6 +223,18 @@
       stopped = false;
       stoppedThreadId = null;
       stopReason = "";
+    }
+  }
+
+  async function handleSendCommand() {
+    const cmd = commandInput.trim();
+    if (!cmd) return;
+    try {
+      await invoke("send_minecraft_command", { command: cmd });
+      commandHistory = [cmd, ...commandHistory.filter((c) => c !== cmd)].slice(0, 8);
+      commandInput = "";
+    } catch (e) {
+      error = String(e);
     }
   }
 
@@ -576,320 +296,43 @@
     events = [];
   }
 
-  function logLevelName(level: number): string {
-    return level === 0 ? "LOG" : level === 1 ? "WARN" : "ERROR";
+  function handleKindToggle(kind: McEvent["kind"]) {
+    kindFilters[kind] = !kindFilters[kind];
   }
 
-  function formatEvent(event: McEvent): string {
-    const t = new Date().toLocaleTimeString();
-    switch (event.kind) {
-      case "protocol":
-        return `${t} PROTOCOL v${event.version} (${event.plugins.length} plugins)`;
-      case "stopped":
-        return `${t} STOPPED ${event.reason} thread=${event.thread}`;
-      case "thread":
-        return `${t} THREAD ${event.reason} thread=${event.thread}`;
-      case "print":
-        return `${t} ${logLevelName(event.logLevel)} ${event.message}`;
-      case "notification":
-        return `${t} NOTICE ${event.message}`;
-      case "stat2": {
-        const names = event.stats.map((s) => s.name).join(", ");
-        return `${t} STAT tick=${event.tick} [${names || "empty"}]`;
-      }
-      case "profilerCapture":
-        return `${t} PROFILER ${event.captureBasePath}`;
-      case "schema":
-        return `${t} SCHEMA (${event.count} tabs)`;
-      case "terminated":
-        return `${t} TERMINATED ${event.reason ?? ""}`;
-      case "unknown":
-        return `${t} UNKNOWN ${event.typeName}`;
-    }
-  }
-
-  function eventIcon(kind: McEvent["kind"]) {
-    switch (kind) {
-      case "protocol":
-        return Server;
-      case "stopped":
-        return Pause;
-      case "thread":
-        return Activity;
-      case "print":
-        return Terminal;
-      case "notification":
-        return Bell;
-      case "stat2":
-        return BarChart3;
-      case "profilerCapture":
-        return Timer;
-      case "schema":
-        return Layers;
-      case "terminated":
-        return AlertCircle;
-      case "unknown":
-        return HelpCircle;
-    }
-  }
-
-  function eventColor(kind: McEvent["kind"]): string {
-    switch (kind) {
-      case "protocol":
-        return "text-indigo-500 dark:text-indigo-400";
-      case "stopped":
-        return "text-rose-500 dark:text-rose-400";
-      case "thread":
-        return "text-amber-500 dark:text-amber-400";
-      case "print":
-        return "text-emerald-500 dark:text-emerald-400";
-      case "notification":
-        return "text-sky-500 dark:text-sky-400";
-      case "stat2":
-        return "text-violet-500 dark:text-violet-400";
-      case "profilerCapture":
-        return "text-fuchsia-500 dark:text-fuchsia-400";
-      case "schema":
-        return "text-cyan-500 dark:text-cyan-400";
-      case "terminated":
-        return "text-red-500 dark:text-red-400";
-      case "unknown":
-        return "text-stone-500 dark:text-stone-400";
-    }
+  function handleToggleCategory(key: string) {
+    expandedCategories[key] = !expandedCategories[key];
   }
 </script>
 
 <div class="flex h-screen w-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
-  <aside class="flex w-80 flex-col border-r border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900">
-    <div class="flex items-center gap-3 border-b border-zinc-200 p-4 dark:border-zinc-800">
-      <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-indigo-600 text-white shadow-md shadow-indigo-600/20">
-        <Bug class="h-6 w-6" />
-      </div>
-      <div class="min-w-0">
-        <h1 class="truncate text-sm font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">Minecraft Debugger</h1>
-        <p class="text-xs text-zinc-500 dark:text-zinc-400">Standalone</p>
-      </div>
-    </div>
-
-    <div class="flex-1 space-y-5 overflow-y-auto p-4">
-      {#if error}
-        <div transition:fade={{ duration: 150 }} class="flex items-start gap-2 rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-300">
-          <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-          <span class="break-words">{error}</span>
-        </div>
-      {/if}
-
-      <section class="space-y-3">
-        <div class="flex items-center gap-2">
-          <Activity class="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
-          <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Connection</h2>
-        </div>
-
-        <div class="grid grid-cols-2 gap-1 rounded-lg bg-zinc-200/60 p-1 dark:bg-zinc-800/60">
-          <button
-            type="button"
-            disabled={connecting || connected}
-            onclick={() => (mode = "listen")}
-            class="flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium transition-colors {mode === 'listen'
-              ? 'bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
-              : 'text-zinc-600 hover:bg-zinc-200/50 dark:text-zinc-400 dark:hover:bg-zinc-800/50'} disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <RadioTower class="h-3.5 w-3.5" />
-            Listen
-          </button>
-          <button
-            type="button"
-            disabled={connecting || connected}
-            onclick={() => (mode = "connect")}
-            class="flex items-center justify-center gap-2 rounded-md px-3 py-2 text-xs font-medium transition-colors {mode === 'connect'
-              ? 'bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
-              : 'text-zinc-600 hover:bg-zinc-200/50 dark:text-zinc-400 dark:hover:bg-zinc-800/50'} disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <PlugZap class="h-3.5 w-3.5" />
-            Connect
-          </button>
-        </div>
-
-        <div class="space-y-3">
-          {#if mode === "connect"}
-            <label class="block">
-              <span class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Host</span>
-              <input
-                type="text"
-                bind:value={host}
-                disabled={connecting || connected}
-                class="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-              />
-            </label>
-          {/if}
-
-          <label class="block">
-            <span class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Port</span>
-            <input
-              type="number"
-              bind:value={port}
-              disabled={connecting || connected}
-              class="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-            />
-          </label>
-        </div>
-
-        <button
-          type="button"
-          onclick={() => (advancedOpen = !advancedOpen)}
-          class="flex w-full items-center justify-between text-xs font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300"
-        >
-          <span>Advanced options</span>
-          {#if advancedOpen}
-            <ChevronDown class="h-3.5 w-3.5" />
-          {:else}
-            <ChevronRight class="h-3.5 w-3.5" />
-          {/if}
-        </button>
-
-        {#if advancedOpen}
-          <div transition:slide={{ duration: 200, easing: cubicOut }} class="space-y-3 pt-1">
-            <label class="block">
-              <span class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Target module UUID</span>
-              <input
-                type="text"
-                bind:value={targetModuleUuid}
-                disabled={connecting || connected}
-                placeholder="Required if multiple plugins"
-                class="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-              />
-            </label>
-
-            <label class="block">
-              <span class="mb-1 block text-xs font-medium text-zinc-600 dark:text-zinc-400">Passcode</span>
-              <input
-                type="text"
-                bind:value={passcode}
-                disabled={connecting || connected}
-                placeholder="Only if MC requires one"
-                class="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-              />
-            </label>
-          </div>
-        {/if}
-
-        {#if connecting}
-          <button
-            type="button"
-            onclick={handleCancel}
-            class="flex w-full items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-rose-600/20 transition-colors hover:bg-rose-700 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
-          >
-            <LoaderCircle class="h-4 w-4 animate-spin" />
-            {mode === "listen" ? "Stop listening" : "Stop connecting"}
-          </button>
-        {:else if !connected}
-          <button
-            type="button"
-            onclick={handleConnect}
-            class="flex w-full items-center justify-center gap-2 rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-indigo-600/20 transition-colors hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
-          >
-            <Play class="h-4 w-4" />
-            {mode === "listen" ? "Listen" : "Connect"}
-          </button>
-        {:else}
-          <button
-            type="button"
-            onclick={handleDisconnect}
-            class="flex w-full items-center justify-center gap-2 rounded-lg bg-rose-600 px-4 py-2.5 text-sm font-semibold text-white shadow-md shadow-rose-600/20 transition-colors hover:bg-rose-700 focus:outline-none focus:ring-2 focus:ring-rose-500/40"
-          >
-            <Square class="h-4 w-4" />
-            Disconnect
-          </button>
-        {/if}
-      </section>
-
-      {#if handshake}
-        <section transition:fly={{ y: -12, duration: 200, easing: cubicOut }} class="space-y-3">
-          <div class="flex items-center gap-2">
-            <Server class="h-4 w-4 text-indigo-500 dark:text-indigo-400" />
-            <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Handshake</h2>
-          </div>
-
-          <div class="space-y-2 rounded-lg border border-zinc-200 bg-white p-3 text-xs dark:border-zinc-800 dark:bg-zinc-950">
-            <div class="flex items-center justify-between">
-              <span class="text-zinc-500 dark:text-zinc-400">Protocol</span>
-              <span class="font-mono font-semibold text-zinc-900 dark:text-zinc-100">v{handshake.version}</span>
-            </div>
-            <div class="flex items-center justify-between">
-              <span class="text-zinc-500 dark:text-zinc-400">Passcode</span>
-              <span class="font-medium text-zinc-900 dark:text-zinc-100">{handshake.requirePasscode ? "Required" : "Not required"}</span>
-            </div>
-            <div class="pt-1">
-              <span class="text-zinc-500 dark:text-zinc-400">Plugins ({handshake.plugins.length})</span>
-              {#if handshake.plugins.length === 0}
-                <p class="mt-1 italic text-zinc-400 dark:text-zinc-500">none</p>
-              {:else}
-                <ul class="mt-1 space-y-1">
-                  {#each handshake.plugins as p (p.module_uuid)}
-                    <li class="rounded-md bg-zinc-50 px-2 py-1.5 dark:bg-zinc-900">
-                      <div class="font-medium text-zinc-900 dark:text-zinc-100">{p.name}</div>
-                      <div class="font-mono text-[10px] text-zinc-500 dark:text-zinc-400">{p.module_uuid}</div>
-                    </li>
-                  {/each}
-                </ul>
-              {/if}
-            </div>
-          </div>
-         </section>
-      {/if}
-
-      {#if connected}
-        <section class="space-y-3">
-          <div class="flex items-center gap-2">
-            <Terminal class="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
-            <h2 class="text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">Commands</h2>
-          </div>
-
-          <form onsubmit={(e) => { e.preventDefault(); handleSendCommand(); }}>
-            <div class="relative">
-              <Terminal class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500" />
-              <input
-                type="text"
-                bind:value={commandInput}
-                placeholder="/say hello"
-                class="w-full rounded-md border border-zinc-300 bg-white py-2 pl-8 pr-3 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-              />
-            </div>
-          </form>
-
-          {#if commandHistory.length > 0}
-            <div class="flex flex-wrap gap-1">
-              {#each commandHistory as cmd, i (i)}
-                <button
-                  type="button"
-                  onclick={() => (commandInput = cmd)}
-                  title={cmd}
-                  class="max-w-full truncate rounded-full border border-zinc-200 bg-white px-2 py-1 font-mono text-[10px] text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                >
-                  {cmd}
-                </button>
-              {/each}
-            </div>
-          {/if}
-        </section>
-      {/if}
-    </div>
-
-    <div class="flex items-center justify-between border-t border-zinc-200 p-3 dark:border-zinc-800">
-      <span class="text-xs font-medium text-zinc-500 dark:text-zinc-400">Status</span>
-      <div class="flex items-center gap-2 rounded-md {status.badge} px-2.5 py-1.5 text-xs font-medium">
-        {#if status.icon === LoaderCircle}
-          <LoaderCircle class="h-3.5 w-3.5 animate-spin" />
-        {:else if status.icon}
-          {@const Icon = status.icon}
-          <Icon class="h-3.5 w-3.5" />
-        {:else}
-          <span class="h-1.5 w-1.5 rounded-full {status.dot}"></span>
-        {/if}
-        {status.label}
-      </div>
-    </div>
-  </aside>
+  <Sidebar
+    {mode}
+    {host}
+    {port}
+    {targetModuleUuid}
+    {passcode}
+    {advancedOpen}
+    {connecting}
+    {connected}
+    {handshake}
+    {error}
+    {status}
+    {commandInput}
+    {commandHistory}
+    onModeChange={(m) => (mode = m)}
+    onHostChange={(h) => (host = h)}
+    onPortChange={(p) => (port = p)}
+    onTargetUuidChange={(u) => (targetModuleUuid = u)}
+    onPasscodeChange={(p) => (passcode = p)}
+    onAdvancedToggle={() => (advancedOpen = !advancedOpen)}
+    onConnect={handleConnect}
+    onDisconnect={handleDisconnect}
+    onCancel={handleCancel}
+    onCommandInputChange={(c) => (commandInput = c)}
+    onSendCommand={handleSendCommand}
+    onCommandHistorySelect={(c) => (commandInput = c)}
+  />
 
   <main class="flex min-w-0 flex-1 flex-col">
     <header class="flex items-center justify-between border-b border-zinc-200 bg-white px-4 py-2.5 dark:border-zinc-800 dark:bg-zinc-950">
@@ -905,66 +348,17 @@
       </div>
     </header>
 
-    {#if connected}
-      <div class="flex items-center gap-1 border-b border-zinc-200 bg-white px-3 py-2 dark:border-zinc-800 dark:bg-zinc-950">
-        {#if stopped}
-          <span class="mr-2 flex items-center gap-1.5 rounded-md bg-amber-50 px-2 py-1 text-xs font-medium text-amber-700 dark:bg-amber-950/30 dark:text-amber-300">
-            <Pause class="h-3.5 w-3.5" />
-            Paused: {stopReason}
-          </span>
-        {/if}
-
-        {#if !stopped && !busy}
-          <button
-            type="button"
-            onclick={pauseThread}
-            class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-          >
-            <Pause class="h-4 w-4" />
-            Pause
-          </button>
-        {/if}
-
-        {#if stopped && !busy}
-          <button
-            type="button"
-            onclick={resumeThread}
-            class="flex items-center gap-1.5 rounded-md bg-indigo-600 px-2.5 py-1.5 text-xs font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 dark:bg-indigo-600 dark:hover:bg-indigo-700"
-          >
-            <Play class="h-4 w-4" />
-            Continue
-          </button>
-          <button
-            type="button"
-            onclick={stepNext}
-            class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-          >
-            <SkipForward class="h-4 w-4" />
-            Next
-          </button>
-          <button
-            type="button"
-            onclick={stepIn}
-            class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-          >
-            <CornerDownRight class="h-4 w-4" />
-            In
-          </button>
-          <button
-            type="button"
-            onclick={stepOut}
-            class="flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-          >
-            <CornerUpRight class="h-4 w-4" />
-            Out
-          </button>
-        {/if}
-
-        {#if busy}
-          <LoaderCircle class="h-4 w-4 animate-spin text-zinc-500 dark:text-zinc-400" />
-        {/if}
-      </div>
-    {/if}
+    <DebugControls
+      {connected}
+      {stopped}
+      {stopReason}
+      {busy}
+      onPause={pauseThread}
+      onContinue={resumeThread}
+      onStepNext={stepNext}
+      onStepIn={stepIn}
+      onStepOut={stepOut}
+    />
 
     {#if connected}
       <div class="flex gap-1 border-b border-zinc-200 bg-zinc-50 px-3 py-1.5 dark:border-zinc-800 dark:bg-zinc-900">
@@ -995,277 +389,38 @@
     {/if}
 
     {#if activeTab === "log" || !connected}
-    <div class="flex min-h-0 flex-1 flex-col p-4">
-      <section class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
-        <div class="flex flex-col gap-3 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
-          <div class="flex items-center justify-between">
-            <div class="flex items-center gap-2">
-              <ScrollText class="h-4 w-4 text-zinc-500 dark:text-zinc-400" />
-              <h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Event Log</h2>
-            </div>
-            <div class="flex items-center gap-3">
-              <span class="text-xs text-zinc-500 dark:text-zinc-400">{filteredEvents.length} of {events.length} events</span>
-              <button
-                type="button"
-                onclick={clearLog}
-                disabled={events.length === 0}
-                class="flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-              >
-                <Trash2 class="h-3.5 w-3.5" />
-                Clear
-              </button>
-            </div>
-          </div>
-
-          <div class="flex flex-col gap-2 sm:flex-row">
-            <div class="relative flex-1">
-              <Search class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500" />
-              <input
-                type="text"
-                bind:value={searchQuery}
-                placeholder="Search events..."
-                class="w-full rounded-md border border-zinc-300 bg-white py-1.5 pl-8 pr-3 text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-              />
-            </div>
-            <div class="flex rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
-              {#each [{ label: "All", value: "all" }, { label: "LOG", value: 0 }, { label: "WARN", value: 1 }, { label: "ERROR", value: 2 }] as level}
-                <button
-                  type="button"
-                  onclick={() => (logLevel = level.value as typeof logLevel)}
-                  class="px-2.5 py-1 text-[10px] font-semibold uppercase transition-colors {logLevel === level.value
-                    ? 'rounded-md bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
-                    : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300'}"
-                >
-                  {level.label}
-                </button>
-              {/each}
-            </div>
-          </div>
-
-          <div class="flex flex-wrap gap-1.5">
-            {#each kindOrder as kind}
-              {@const Icon = eventIcon(kind)}
-              <button
-                type="button"
-                onclick={() => (kindFilters[kind] = !kindFilters[kind])}
-                class="flex items-center gap-1 rounded-full border px-2 py-1 text-[10px] font-medium uppercase tracking-wide transition-colors {kindFilters[kind]
-                  ? 'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-900/50 dark:bg-indigo-950/30 dark:text-indigo-300'
-                  : 'border-zinc-200 bg-white text-zinc-500 opacity-70 hover:opacity-100 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-500'}"
-              >
-                <Icon class="h-3 w-3 {kindFilters[kind] ? eventColor(kind) : 'text-zinc-400 dark:text-zinc-500'}" />
-                {kind}
-              </button>
-            {/each}
-          </div>
-        </div>
-
-        <div bind:this={logElement} class="flex-1 overflow-y-auto p-2">
-          {#if events.length === 0}
-            <div class="flex h-full flex-col items-center justify-center text-zinc-400 dark:text-zinc-600">
-              <ScrollText class="mb-2 h-8 w-8 opacity-50" />
-              <p class="text-sm">No events yet.</p>
-            </div>
-          {:else if filteredEvents.length === 0}
-            <div class="flex h-full flex-col items-center justify-center text-zinc-400 dark:text-zinc-600">
-              <Search class="mb-2 h-8 w-8 opacity-50" />
-              <p class="text-sm">No events match the current filter.</p>
-            </div>
-          {:else}
-            <ul class="space-y-0.5 font-mono text-xs">
-              {#each filteredEvents as event, i (i)}
-                {@const Icon = eventIcon(event.kind)}
-                <li class="flex items-start gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900">
-                  <Icon class="mt-0.5 h-3.5 w-3.5 shrink-0 {eventColor(event.kind)}" />
-                  <span class="break-all text-zinc-700 dark:text-zinc-300">{formatEvent(event)}</span>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-        </div>
-      </section>
-    </div>
+      <EventLogPanel
+        {events}
+        {filteredEvents}
+        {searchQuery}
+        {kindFilters}
+        {logLevel}
+        onSearchChange={(q) => (searchQuery = q)}
+        onKindToggle={handleKindToggle}
+        onLogLevelChange={(l) => (logLevel = l)}
+        onClearLog={clearLog}
+      />
     {/if}
 
     {#if connected && activeTab === "stats"}
-      <div class="flex min-h-0 flex-1 flex-col p-4">
-        <div class="flex-1 space-y-6 overflow-y-auto pr-1">
-          {#if Object.keys(statsCollection).length === 0}
-            <div class="flex h-full flex-col items-center justify-center text-zinc-400 dark:text-zinc-600">
-              <BarChart3 class="mb-2 h-8 w-8 opacity-50" />
-              <p class="text-sm">No stats yet. Make sure your add-on is running.</p>
-            </div>
-          {:else}
-            {#each categorizedGroups as category (category.key)}
-              {@const CategoryIcon = category.icon}
-              <section class="border-b border-zinc-200 pb-6 last:border-b-0 dark:border-zinc-800">
-                <button
-                  type="button"
-                  onclick={() => (expandedCategories[category.key] = !expandedCategories[category.key])}
-                  class="mb-4 flex w-full items-center justify-between rounded-lg p-2 transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                >
-                  <div class="flex items-center gap-2.5">
-                    <div class="flex h-7 w-7 items-center justify-center rounded-md bg-indigo-50 text-indigo-600 dark:bg-indigo-950/30 dark:text-indigo-400">
-                      <CategoryIcon class="h-4 w-4" />
-                    </div>
-                    <h2 class="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{category.label}</h2>
-                    <span class="rounded-full bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{category.groups.length}</span>
-                  </div>
-                  {#if expandedCategories[category.key]}
-                    <ChevronDown class="h-4 w-4 text-zinc-400 dark:text-zinc-500" />
-                  {:else}
-                    <ChevronRight class="h-4 w-4 text-zinc-400 dark:text-zinc-500" />
-                  {/if}
-                </button>
-
-                {#if expandedCategories[category.key]}
-                  <div transition:slide={{ duration: 200, easing: cubicOut }}>
-                    {#if category.key === "client" && clientIds.length > 1}
-                      <div class="mb-4 flex items-center gap-2">
-                        <span class="text-xs font-medium text-zinc-500 dark:text-zinc-400">Client</span>
-                        <select
-                          bind:value={selectedClient}
-                          class="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-900 outline-none transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-                        >
-                          <option value="all">All clients</option>
-                          {#each clientIds as clientId}
-                            <option value={clientId}>{clientId}</option>
-                          {/each}
-                        </select>
-                      </div>
-                    {/if}
-
-                    <div class="grid grid-cols-1 gap-4 lg:grid-cols-2 2xl:grid-cols-3">
-                      {#each category.groups as group (group.name)}
-                        {#if group.name === "dynamic_property_values"}
-                          <div class="group/card rounded-xl border border-zinc-200 bg-white p-4 shadow-sm transition-all hover:border-indigo-200 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-950 dark:hover:border-indigo-900/50">
-                            <div class="mb-3 flex items-start justify-between gap-3">
-                              <div class="min-w-0">
-                                <h3 class="truncate text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">{group.name}</h3>
-                                <p class="truncate text-[10px] text-zinc-500 dark:text-zinc-400">{group.series.length} properties</p>
-                              </div>
-                            </div>
-                            <div class="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
-                              <table class="w-full text-left text-xs">
-                                <thead class="bg-zinc-50 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-400">
-                                  <tr>
-                                    <th class="px-3 py-2 font-medium">Property</th>
-                                    <th class="px-3 py-2 text-right font-medium">Value</th>
-                                  </tr>
-                                </thead>
-                                <tbody class="divide-y divide-zinc-200 dark:divide-zinc-800">
-                                  {#each group.series as series (series.path)}
-                                    {@const rawVal = series.values[series.values.length - 1]}
-                                    <tr class="transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900">
-                                      <td class="px-3 py-2 font-medium text-zinc-700 dark:text-zinc-300">{shortName(series.path)}</td>
-                                      <td class="px-3 py-2 text-right font-mono text-zinc-600 dark:text-zinc-400">
-                                        {#if rawVal === undefined || rawVal === null}
-                                          —
-                                        {:else if typeof rawVal === "number"}
-                                          {formatStatValue(rawVal)}
-                                        {:else}
-                                          {String(rawVal)}
-                                        {/if}
-                                      </td>
-                                    </tr>
-                                  {/each}
-                                </tbody>
-                              </table>
-                            </div>
-                          </div>
-                        {:else}
-                          {@const activeSeries = group.series.filter((s) => !isEmptySeries(s))}
-                          {@const filteredSeries = category.key === "client" && selectedClient !== "all" ? activeSeries.filter((s) => getClientId(s.path) === selectedClient) : activeSeries}
-                          {@const displaySeries = filteredSeries.map((s) => scaleSeriesForDisplay(s, group.name))}
-                          {#if displaySeries.length > 0}
-                            {@const seriesNames = displaySeries.map((s) => shortName(s.path))}
-                            {@const groupData = buildGroupData(displaySeries)}
-                            {@const rawLastVal = filteredSeries[0]?.values[filteredSeries[0]?.values.length - 1]}
-                            <div class="group/card rounded-xl border border-zinc-200 bg-white p-4 shadow-sm transition-all hover:border-indigo-200 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-950 dark:hover:border-indigo-900/50">
-                              <div class="mb-3 flex items-start justify-between gap-3">
-                                <div class="min-w-0">
-                                  <h3 class="truncate text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">{group.name}</h3>
-                                  <p class="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
-                                    {#if displaySeries.length === 1}
-                                      {shortName(displaySeries[0].path)}
-                                    {:else}
-                                      {displaySeries.length} series
-                                    {/if}
-                                  </p>
-                                </div>
-                                {#if displaySeries.length === 1}
-                                  <span class="shrink-0 rounded-full bg-indigo-50 px-2 py-0.5 font-mono text-xs font-semibold text-indigo-600 dark:bg-indigo-950/30 dark:text-indigo-400">
-                                    {formatGroupValue(group.name, rawLastVal)}
-                                  </span>
-                                {:else}
-                                  <span class="shrink-0 rounded-full bg-zinc-100 px-2 py-0.5 font-mono text-xs font-semibold text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400">
-                                    {displaySeries.length}
-                                  </span>
-                                {/if}
-                              </div>
-                              <div class="relative overflow-hidden rounded-lg bg-zinc-50/50 text-zinc-500 dark:bg-zinc-900/50 dark:text-zinc-400">
-                                <UPlotChart options={makeChartOptions(group.name, seriesNames)} data={groupData} formatValue={isMemoryGroup(group.name) ? formatMemoryValue : undefined} />
-                              </div>
-                            </div>
-                          {/if}
-                        {/if}
-                      {/each}
-                    </div>
-                  </div>
-                {/if}
-              </section>
-            {/each}
-          {/if}
-        </div>
-      </div>
+      <StatsPanel
+        {categorizedGroups}
+        {expandedCategories}
+        {selectedClient}
+        {clientIds}
+        onToggleCategory={handleToggleCategory}
+        onClientChange={(c) => (selectedClient = c)}
+      />
     {/if}
 
     {#if connected && stopped}
-      <div transition:slide={{ duration: 200, easing: cubicOut }} class="border-t border-zinc-200 bg-white p-3 dark:border-zinc-800 dark:bg-zinc-950">
-        <div class="flex items-start gap-2">
-          <div class="relative flex-1">
-            <Terminal class="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400 dark:text-zinc-500" />
-            <input
-              type="text"
-              bind:value={evalExpression}
-              onkeydown={(e) => e.key === "Enter" && handleEvaluate()}
-              placeholder="Evaluate expression…"
-              disabled={busy}
-              class="w-full rounded-md border border-zinc-300 bg-white py-2 pl-8 pr-3 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-            />
-          </div>
-          <button
-            type="button"
-            onclick={handleEvaluate}
-            disabled={busy || !evalExpression.trim()}
-            class="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-2 text-sm font-medium text-white shadow-sm transition-colors hover:bg-indigo-700 disabled:cursor-not-allowed disabled:bg-indigo-600 disabled:opacity-60 dark:bg-indigo-600 dark:hover:bg-indigo-700"
-          >
-            <Send class="h-4 w-4" />
-            Eval
-          </button>
-        </div>
-
-        {#if evalHistory.length > 0}
-          <div transition:fade={{ duration: 150 }} class="mt-3 space-y-2">
-            {#each evalHistory as item, i (i)}
-              <div class="rounded-md border border-zinc-200 bg-zinc-50 p-2 text-xs dark:border-zinc-800 dark:bg-zinc-900">
-                <div class="mb-1 flex items-center justify-between">
-                  <code class="font-mono font-medium text-zinc-700 dark:text-zinc-300">{item.expression}</code>
-                  {#if item.result.success}
-                    <span class="rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-300">OK</span>
-                  {:else}
-                    <span class="rounded-full bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-700 dark:bg-rose-950/30 dark:text-rose-300">ERR</span>
-                  {/if}
-                </div>
-                {#if item.result.success}
-                  <pre class="overflow-x-auto rounded bg-white p-1.5 font-mono text-[10px] text-zinc-600 dark:bg-zinc-950 dark:text-zinc-400">{JSON.stringify(item.result.args, null, 2)}</pre>
-                {:else}
-                  <p class="text-rose-600 dark:text-rose-400">{item.result.message ?? "Evaluation failed"}</p>
-                {/if}
-              </div>
-            {/each}
-          </div>
-        {/if}
-      </div>
+      <EvaluatePanel
+        {evalExpression}
+        {evalHistory}
+        {busy}
+        onEvaluate={handleEvaluate}
+        onExpressionChange={(e) => (evalExpression = e)}
+      />
     {/if}
   </main>
 </div>
