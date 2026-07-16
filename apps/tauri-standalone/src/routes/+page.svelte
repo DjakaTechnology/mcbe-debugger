@@ -64,13 +64,7 @@
 
   let statsCollection = $state<Record<string, StatSeries>>({});
 
-  let expandedCategories = $state<Record<string, boolean>>({
-    "server-performance": true,
-    memory: true,
-    scripting: true,
-    client: true,
-    uncategorized: true,
-  });
+  let activeStatsCategory = $state<string>("all");
   let selectedClient = $state<string | "all">("all");
 
   let filteredEvents = $derived.by(() => {
@@ -299,10 +293,6 @@
   function handleKindToggle(kind: McEvent["kind"]) {
     kindFilters[kind] = !kindFilters[kind];
   }
-
-  function handleToggleCategory(key: string) {
-    expandedCategories[key] = !expandedCategories[key];
-  }
 </script>
 
 <div class="flex h-screen w-full overflow-hidden bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100">
@@ -405,10 +395,10 @@
     {#if connected && activeTab === "stats"}
       <StatsPanel
         {categorizedGroups}
-        {expandedCategories}
+        activeCategory={activeStatsCategory}
         {selectedClient}
         {clientIds}
-        onToggleCategory={handleToggleCategory}
+        onCategoryChange={(c) => (activeStatsCategory = c)}
         onClientChange={(c) => (selectedClient = c)}
       />
     {/if}
