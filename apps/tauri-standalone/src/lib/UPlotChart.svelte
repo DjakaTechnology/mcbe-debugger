@@ -78,6 +78,7 @@
 </script>
 
 <div
+  role="img"
   class="relative w-full"
   onmouseenter={() => (frozen = true)}
   onmouseleave={() => {
