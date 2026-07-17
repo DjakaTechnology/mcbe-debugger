@@ -3,6 +3,14 @@ fn adapter_info() -> mc_tauri::AdapterInfo {
     mc_tauri::adapter_info()
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn set_workspace_root(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    workspace_root: Option<String>,
+) -> mc_tauri::WorkspaceMapStatus {
+    mc_tauri::set_workspace_root(&state, workspace_root)
+}
+
 #[tauri::command]
 async fn listen_to_minecraft(
     state: tauri::State<'_, mc_tauri::AppState>,
@@ -115,6 +123,7 @@ pub fn run() {
         .manage(mc_tauri::AppState::new())
         .invoke_handler(tauri::generate_handler![
             adapter_info,
+            set_workspace_root,
             listen_to_minecraft,
             connect_to_minecraft,
             disconnect,

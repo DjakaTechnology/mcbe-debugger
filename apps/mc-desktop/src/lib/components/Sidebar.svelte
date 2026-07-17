@@ -13,7 +13,10 @@
   import AlertCircle from "@lucide/svelte/icons/alert-circle";
   import Activity from "@lucide/svelte/icons/activity";
   import Terminal from "@lucide/svelte/icons/terminal";
-  import type { HandshakeInfo } from "$lib/types.js";
+  import MapPin from "@lucide/svelte/icons/map-pin";
+  import MapPinOff from "@lucide/svelte/icons/map-pin-off";
+  import FolderTree from "@lucide/svelte/icons/folder-tree";
+  import type { HandshakeInfo, SourceMapStatus } from "$lib/types.js";
 
   let {
     mode,
@@ -29,6 +32,8 @@
     status,
     commandInput,
     commandHistory,
+    workspaceRoot,
+    sourceMapStatus,
     onModeChange,
     onHostChange,
     onPortChange,
@@ -41,6 +46,7 @@
     onCommandInputChange,
     onSendCommand,
     onCommandHistorySelect,
+    onWorkspaceRootChange,
   }: {
     mode: "listen" | "connect";
     host: string;
@@ -55,6 +61,8 @@
     status: { label: string; dot: string; badge: string; icon: any | null };
     commandInput: string;
     commandHistory: string[];
+    workspaceRoot: string;
+    sourceMapStatus: SourceMapStatus;
     onModeChange: (mode: "listen" | "connect") => void;
     onHostChange: (host: string) => void;
     onPortChange: (port: number) => void;
@@ -67,7 +75,62 @@
     onCommandInputChange: (cmd: string) => void;
     onSendCommand: () => void;
     onCommandHistorySelect: (cmd: string) => void;
+    onWorkspaceRootChange: (workspaceRoot: string) => void;
   } = $props();
+
+  // Compact inline status for the workspace-root field.
+  let sourceMapBadge = $derived.by(() => {
+    switch (sourceMapStatus.state) {
+      case "loading":
+        return {
+          label: "Resolving map…",
+          dot: "bg-amber-500",
+          text: "text-amber-600 dark:text-amber-400",
+          icon: LoaderCircle,
+          spin: true,
+          title: "Loading source map",
+        };
+      case "loaded":
+        return {
+          label: "Map loaded",
+          dot: "bg-emerald-500",
+          text: "text-emerald-600 dark:text-emerald-400",
+          icon: MapPin,
+          spin: false,
+          title: sourceMapStatus.mapPath,
+        };
+      case "unavailable":
+        return {
+          label: "Map unavailable",
+          dot: "bg-zinc-400",
+          text: "text-zinc-500 dark:text-zinc-400",
+          icon: MapPinOff,
+          spin: false,
+          // Carries the backend status message when present (missing or
+          // malformed map); falls back to a helpful default otherwise.
+          title: sourceMapStatus.message ?? "BP/scripts/main.js.map not found or invalid",
+        };
+      case "error":
+        return {
+          label: "Map error",
+          dot: "bg-rose-500",
+          text: "text-rose-600 dark:text-rose-400",
+          icon: AlertCircle,
+          spin: false,
+          title: sourceMapStatus.message,
+        };
+      case "disabled":
+      default:
+        return {
+          label: "Disabled",
+          dot: "bg-zinc-400",
+          text: "text-zinc-500 dark:text-zinc-400",
+          icon: MapPinOff,
+          spin: false,
+          title: "No workspace root set",
+        };
+    }
+  });
 </script>
 
 <aside class="flex w-80 flex-col border-r border-zinc-200 bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-900">
@@ -183,6 +246,43 @@
               placeholder="Only if MC requires one"
               class="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
             />
+          </label>
+
+          <label class="block">
+            <span class="flex items-center gap-1.5">
+              <FolderTree class="h-3 w-3 text-zinc-500 dark:text-zinc-400" />
+              <span class="text-xs font-medium text-zinc-600 dark:text-zinc-400">Workspace root</span>
+            </span>
+            <span class="mb-1 block text-[10px] text-zinc-400 dark:text-zinc-500">
+              Project folder containing <code class="font-mono">BP/</code> — expects
+              <code class="font-mono">BP/scripts/main.js.map</code>
+            </span>
+            <input
+              type="text"
+              value={workspaceRoot}
+              oninput={(e) => onWorkspaceRootChange(e.currentTarget.value)}
+              placeholder="C:\path\to\project"
+              spellcheck="false"
+              autocomplete="off"
+              class="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+            />
+            <div
+              class="mt-1.5 flex items-center gap-1.5 text-[11px] {sourceMapBadge.text}"
+              title={sourceMapBadge.title}
+            >
+              {#if sourceMapBadge.spin}
+                <LoaderCircle class="h-3 w-3 shrink-0 animate-spin" />
+              {:else}
+                {@const StatusIcon = sourceMapBadge.icon}
+                <StatusIcon class="h-3 w-3 shrink-0" />
+              {/if}
+              <span class="truncate">{sourceMapBadge.label}</span>
+              {#if sourceMapStatus.state === "loaded"}
+                <span class="truncate text-zinc-400 dark:text-zinc-500" title={sourceMapStatus.mapPath}>
+                  {sourceMapStatus.mapPath}
+                </span>
+              {/if}
+            </div>
           </label>
         </div>
       {/if}

@@ -14,8 +14,18 @@
   import Layers from "@lucide/svelte/icons/layers";
   import AlertCircle from "@lucide/svelte/icons/alert-circle";
   import HelpCircle from "@lucide/svelte/icons/help-circle";
-  import type { McEvent } from "$lib/types.js";
-  import { formatEvent, eventIcon, eventColor } from "$lib/events.js";
+  import MapPin from "@lucide/svelte/icons/map-pin";
+  import FileCode from "@lucide/svelte/icons/file-code";
+  import type { McEvent, SourceFrame } from "$lib/types.js";
+  import {
+    formatEvent,
+    eventIcon,
+    eventColor,
+    frameLabel,
+    frameTitle,
+    getEventFrames,
+    frameVisibleInMessage,
+  } from "$lib/events.js";
   import { kindOrder } from "$lib/stats.js";
 
   let {
@@ -41,6 +51,19 @@
     onClearLog: () => void;
     onResetFilters: () => void;
   } = $props();
+
+  // Subordinate source-frame rows for an event. The raw message is always
+  // preserved verbatim; a frame is suppressed only when the message already
+  // shows that same frame's location (mapped source path for mapped frames,
+  // generated path for unmapped frames). Function names are never used as a
+  // suppression key, so a mapped original source row still surfaces even when
+  // the raw stack mentions the function name.
+  function visibleFramesFor(event: McEvent): SourceFrame[] {
+    if (event.kind !== "print" && event.kind !== "notification") return [];
+    const frames = getEventFrames(event);
+    if (frames.length === 0) return [];
+    return frames.filter((f) => frameVisibleInMessage(f, event.message));
+  }
 
   let logElement = $state<HTMLDivElement | null>(null);
   let filterOpen = $state(false);
@@ -216,9 +239,44 @@
         <ul class="space-y-0.5 font-mono text-xs">
           {#each filteredEvents as event, i (i)}
             {@const Icon = iconComponents[eventIcon(event.kind)]}
-            <li class="flex items-start gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900">
-              <Icon class="mt-0.5 h-3.5 w-3.5 shrink-0 {eventColor(event.kind)}" />
-              <span class="break-all text-zinc-700 dark:text-zinc-300">{formatEvent(event)}</span>
+            {@const frames = visibleFramesFor(event)}
+            <li class="rounded-md px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900">
+              <div class="flex items-start gap-2">
+                <Icon class="mt-0.5 h-3.5 w-3.5 shrink-0 {eventColor(event.kind)}" />
+                <div class="min-w-0 flex-1">
+                  <span class="break-all text-zinc-700 dark:text-zinc-300">{formatEvent(event)}</span>
+                  {#if frames.length > 0}
+                    <ul
+                      class="mt-1 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-700"
+                      aria-label="Source frames"
+                    >
+                      {#each frames as frame, fi (fi)}
+                        <li class="flex items-start gap-1.5 text-[11px] leading-snug">
+                          {#if frame.mapped}
+                            <MapPin
+                              class="mt-px h-3 w-3 shrink-0 text-emerald-500 dark:text-emerald-400"
+                              aria-label="Mapped source frame"
+                            />
+                          {:else}
+                            <FileCode
+                              class="mt-px h-3 w-3 shrink-0 text-zinc-400 dark:text-zinc-500"
+                              aria-label="Unmapped generated frame"
+                            />
+                          {/if}
+                          <span
+                            class="block min-w-0 flex-1 truncate {frame.mapped
+                              ? 'text-zinc-600 dark:text-zinc-300'
+                              : 'text-zinc-500 dark:text-zinc-400'}"
+                            title={frameTitle(frame)}
+                          >
+                            {frameLabel(frame)}
+                          </span>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
+              </div>
             </li>
           {/each}
         </ul>

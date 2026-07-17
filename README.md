@@ -33,7 +33,7 @@ mc-tui     ────────────────▶ mc-session ──
 | --- | --- | --- |
 | `mc-protocol` | `crates/mc-protocol` | Core protocol implementation; v8+ flat/Cereal encoding is active, with legacy v5–v7 nested encoding/decoding still TODO. |
 | `mc-session` | `crates/mc-session` | Implemented shared connection/session controller with controls, evaluation, plugin selection, cancellation, and lifecycle events. |
-| `mc-source-maps` | `crates/mc-source-maps` | Stub foundation; source-map resolution is not implemented. |
+| `mc-source-maps` | `crates/mc-source-maps` | Filesystem-backed bidirectional source-map resolution is implemented; DAP integration is not yet wired. |
 | `mc-tauri` | `adapters/mc-tauri` | Implemented Tauri-facing adapter over the shared session. |
 | `mc-dap-server` | `adapters/mc-dap-server` | Experimental/incomplete DAP sidecar stub. |
 | `mc-desktop` | `apps/mc-desktop` and `apps/mc-desktop/src-tauri` | Implemented Tauri + Svelte desktop debugger UI. |
@@ -102,7 +102,7 @@ bun run build
 
 ## Known limitations and direction
 
-The protocol's legacy nested v5–v7 codecs are explicit stubs, and live v7 compatibility depends on the plugin and environment. Source-map lookup is a stub. The DAP server and Zed extension are experimental scaffolding rather than a complete editor integration; attach behavior and source-level debugging are not finished. Near-term work is to complete protocol parity, then build out source maps, DAP translation, and reliable Zed workflows while preserving the tested desktop/TUI session behavior.
+The protocol's legacy nested v5–v7 codecs are explicit stubs, and live v7 compatibility depends on the plugin and environment. Filesystem-backed source-map lookup is available, but it is not yet integrated with DAP. The DAP server and Zed extension are experimental scaffolding rather than a complete editor integration; attach behavior and source-level debugging are not finished. Near-term work is to complete protocol parity, then build out DAP translation and reliable Zed workflows while preserving the tested desktop/TUI session behavior.
 
 ## Repository tree
 
@@ -110,7 +110,7 @@ The protocol's legacy nested v5–v7 codecs are explicit stubs, and live v7 comp
 crates/
   mc-protocol/       Wire protocol, framing, events, and codecs
   mc-session/        Shared connection/session controller
-  mc-source-maps/    Source-map foundation (stub)
+  mc-source-maps/    Filesystem-backed source-map resolver
 adapters/
   mc-tauri/          Tauri session adapter
   mc-dap-server/     DAP sidecar (experimental)

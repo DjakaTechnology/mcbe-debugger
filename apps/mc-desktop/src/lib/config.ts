@@ -11,6 +11,7 @@ export interface AppConfigV1 {
   searchQuery: string;
   kindFilters: Record<string, boolean>;
   logLevel: "all" | 0 | 1 | 2;
+  workspaceRoot: string;
 }
 
 export type AppConfig = AppConfigV1;
@@ -46,6 +47,7 @@ const DEFAULT_CONFIG: AppConfig = {
   searchQuery: "",
   kindFilters: { ...DEFAULT_KIND_FILTERS },
   logLevel: "all",
+  workspaceRoot: "",
 };
 
 // ── Sanitize / merge ─────────────────────────────────────────────────
@@ -107,6 +109,9 @@ function sanitize(raw: unknown): AppConfig {
       typeof r.searchQuery === "string" ? r.searchQuery : DEFAULT_CONFIG.searchQuery,
     kindFilters,
     logLevel,
+    // Older configs predate source-map support; tolerate missing/invalid values.
+    workspaceRoot:
+      typeof r.workspaceRoot === "string" ? r.workspaceRoot : DEFAULT_CONFIG.workspaceRoot,
   };
 }
 
@@ -196,5 +201,15 @@ export function saveFilterState(
   }
   _config.kindFilters = sanitized;
   _config.logLevel = logLevel;
+  scheduleSave();
+}
+
+/**
+ * Persist the workspace root used for source-map resolution. An empty string
+ * means "no workspace configured"; the backend receives null in that case.
+ */
+export function saveWorkspaceRoot(workspaceRoot: string): void {
+  if (!_config) return;
+  _config.workspaceRoot = workspaceRoot;
   scheduleSave();
 }

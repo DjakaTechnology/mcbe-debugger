@@ -2528,6 +2528,7 @@ dependencies = [
  "bytes",
  "mc-protocol",
  "mc-session",
+ "mc-source-maps",
  "serde",
  "serde_json",
  "tauri",

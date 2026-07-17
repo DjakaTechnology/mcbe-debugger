@@ -10,15 +10,24 @@
   import ScrollText from "@lucide/svelte/icons/scroll-text";
   import BarChart3 from "@lucide/svelte/icons/bar-chart-3";
 
-  import type { McEvent, HandshakeInfo, ResponsePayload, StatSeries, PluginInfo } from "$lib/types.js";
+  import type {
+    McEvent,
+    HandshakeInfo,
+    ResponsePayload,
+    StatSeries,
+    PluginInfo,
+    SetWorkspaceRootResult,
+    SourceMapStatus,
+  } from "$lib/types.js";
   import { accumulateStats, buildChartGroups, buildCategorizedGroups, buildClientIds, buildSubscriberAddonIds, kindOrder } from "$lib/stats.js";
-  import { formatEvent } from "$lib/events.js";
+  import { eventSearchText } from "$lib/events.js";
   import {
     loadConfig,
     savePasscode,
     saveLastTargetModuleUuid,
     saveKnownPlugins,
     saveFilterState,
+    saveWorkspaceRoot,
   } from "$lib/config.js";
 
   import Sidebar from "$lib/components/Sidebar.svelte";
@@ -62,6 +71,10 @@
   });
   let logLevel = $state<"all" | 0 | 1 | 2>("all");
 
+  // ── Source-map workspace state ────────────────────────────────────────
+  let workspaceRoot = $state("");
+  let sourceMapStatus = $state<SourceMapStatus>({ state: "disabled" });
+
   // ── Config / auto-relisten state ──────────────────────────────────────
   let configLoaded = $state(false);
   let intentionalDisconnect = $state(false);
@@ -94,7 +107,9 @@
       if (logLevel !== "all" && (event.kind === "print" || event.kind === "notification")) {
         if (event.logLevel !== logLevel) return false;
       }
-      if (query && !formatEvent(event).toLowerCase().includes(query)) return false;
+      // Search covers the raw formatted line plus any attached source frames
+      // (function names, mapped source paths, generated paths).
+      if (query && !eventSearchText(event).includes(query)) return false;
       return true;
     });
   });
@@ -157,6 +172,7 @@
         }
       }
       logLevel = cfg.logLevel;
+      workspaceRoot = cfg.workspaceRoot;
       configLoaded = true;
     }).catch((err) => {
       if (cancelled) return;
@@ -441,6 +457,64 @@
     };
   });
 
+  // ── Source-map workspace root: persist + sync to backend ──────────────
+  // Debounced so rapid edits (and filesystem path typing) don't trigger a
+  // backend reload on every keystroke. A monotonic request id guards against
+  // stale async responses overwriting a newer edit.
+  let _workspaceTimer: ReturnType<typeof setTimeout> | null = null;
+  let _workspaceReqId = 0;
+
+  /**
+   * Map a successful `set_workspace_root` response to frontend status.
+   * A backend-reported status error (missing/malformed map) is `unavailable`
+   * with its message — NOT `error`, which is reserved for an actual Tauri
+   * invoke exception surfaced in the catch below. A missing map is never the
+   * page's primary connection error.
+   */
+  function parseSourceMapStatus(r: SetWorkspaceRootResult): SourceMapStatus {
+    if (r.error) return { state: "unavailable", message: r.error };
+    if (!r.enabled) return { state: "disabled" };
+    if (r.mapPath) return { state: "loaded", mapPath: r.mapPath };
+    return { state: "unavailable" };
+  }
+
+  async function syncWorkspaceRoot(value: string): Promise<void> {
+    const reqId = ++_workspaceReqId;
+    const trimmed = value.trim();
+    sourceMapStatus = { state: "loading" };
+    try {
+      const result = await invoke<SetWorkspaceRootResult>("set_workspace_root", {
+        workspaceRoot: trimmed || null,
+      });
+      // Ignore stale responses so an old request can't overwrite a newer edit.
+      if (reqId !== _workspaceReqId) return;
+      sourceMapStatus = parseSourceMapStatus(result);
+    } catch (e) {
+      if (reqId !== _workspaceReqId) return;
+      // Reserved for an actual Tauri invoke exception (command missing,
+      // serialization failure, etc.), not a missing/malformed map.
+      sourceMapStatus = { state: "error", message: String(e) };
+    }
+  }
+
+  $effect(() => {
+    workspaceRoot;
+    configLoaded;
+
+    if (!configLoaded) return;
+
+    if (_workspaceTimer) clearTimeout(_workspaceTimer);
+    _workspaceTimer = setTimeout(() => {
+      _workspaceTimer = null;
+      saveWorkspaceRoot(workspaceRoot);
+      void syncWorkspaceRoot(workspaceRoot);
+    }, 600);
+
+    return () => {
+      if (_workspaceTimer) clearTimeout(_workspaceTimer);
+    };
+  });
+
   // ── Auto-relisten ─────────────────────────────────────────────────────
   async function autoRelisten() {
     if (autoRelistening || connected) return;
@@ -515,6 +589,8 @@
     {status}
     {commandInput}
     {commandHistory}
+    {workspaceRoot}
+    {sourceMapStatus}
     onModeChange={(m) => (mode = m)}
     onHostChange={(h) => (host = h)}
     onPortChange={(p) => (port = p)}
@@ -527,6 +603,7 @@
     onCommandInputChange={(c) => (commandInput = c)}
     onSendCommand={handleSendCommand}
     onCommandHistorySelect={(c) => (commandInput = c)}
+    onWorkspaceRootChange={(w) => (workspaceRoot = w)}
   />
 
   <main class="flex min-w-0 flex-1 flex-col">

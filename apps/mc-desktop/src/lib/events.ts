@@ -1,7 +1,101 @@
-import type { McEvent } from "./types.js";
+import type { McEvent, SourceFrame } from "./types.js";
 
 export function logLevelName(level: number): string {
   return level === 0 ? "LOG" : level === 1 ? "WARN" : "ERROR";
+}
+
+// ── Source-frame helpers ─────────────────────────────────────────────
+// Frame coordinates are one-based for display (per the IPC contract).
+
+function formatLoc(line: number | null, column: number | null): string {
+  if (line == null) return "";
+  if (column == null) return `:${line}`;
+  return `:${line}:${column}`;
+}
+
+/**
+ * Compact one-line label for a frame. Mapped frames prioritise the original
+ * source location (`functionName — sourcePath:line[:column]`); unmapped frames
+ * fall back to the generated location.
+ */
+export function frameLabel(frame: SourceFrame): string {
+  if (frame.mapped && frame.sourcePath) {
+    const loc = formatLoc(frame.sourceLine, frame.sourceColumn);
+    const fn = frame.functionName ? `${frame.functionName} — ` : "";
+    return `${fn}${frame.sourcePath}${loc}`;
+  }
+  return `${frame.generatedPath}${formatLoc(frame.generatedLine, frame.generatedColumn)}`;
+}
+
+/**
+ * Accessible title for a frame row. For mapped frames this carries the
+ * generated location as provenance, so the subtle on-row text can stay short.
+ */
+export function frameTitle(frame: SourceFrame): string {
+  if (frame.mapped && frame.sourcePath) {
+    const src = `${frame.sourcePath}${formatLoc(frame.sourceLine, frame.sourceColumn)}`;
+    const gen = `${frame.generatedPath}${formatLoc(frame.generatedLine, frame.generatedColumn)}`;
+    return `Source: ${src}\nGenerated: ${gen}`;
+  }
+  return `${frame.generatedPath}${formatLoc(frame.generatedLine, frame.generatedColumn)}`;
+}
+
+/** Returns the frames attached to an event, or an empty array for kinds without them. */
+export function getEventFrames(event: McEvent): SourceFrame[] {
+  if ((event.kind === "print" || event.kind === "notification") && Array.isArray(event.frames)) {
+    return event.frames;
+  }
+  return [];
+}
+
+/**
+ * Whether a frame should be rendered as a subordinate row, or whether the raw
+ * multiline message already contains its location visually (avoiding duplicate
+ * output while preserving the raw message verbatim).
+ *
+ * A mapped frame is suppressed only when the raw message already contains the
+ * mapped original source location (path, optionally with line/column). It is
+ * intentionally NOT suppressed by a matching function name or generated path:
+ * real stacks always include the function name and generated path, so using
+ * those as suppression keys would hide every new original source row. For
+ * example, raw text `registerShieldSystem (main.js:2394)` must still surface a
+ * mapped `C:\...\src\shield.ts:42` row.
+ *
+ * An unmapped frame has no original source location, so it is suppressed when
+ * the raw message already contains its generated path (the only location it
+ * would display).
+ */
+export function frameVisibleInMessage(frame: SourceFrame, message: string): boolean {
+  const msg = message.toLowerCase();
+  if (frame.mapped && frame.sourcePath) {
+    // Suppress only on the mapped original source path (with optional loc).
+    if (msg.includes(frame.sourcePath.toLowerCase())) {
+      const loc = formatLoc(frame.sourceLine, frame.sourceColumn);
+      if (loc === "" || msg.includes(`${frame.sourcePath}${loc}`.toLowerCase())) return false;
+    }
+    return true;
+  }
+  // Unmapped: suppress only when the generated path is already shown verbatim.
+  return !msg.includes(frame.generatedPath.toLowerCase());
+}
+
+/**
+ * Lowercased searchable text for an event, combining the formatted raw line
+ * with mapped/generated paths and function names so the existing search box
+ * finds source-mapped entries without breaking old message search.
+ */
+export function eventSearchText(event: McEvent): string {
+  const base = formatEvent(event).toLowerCase();
+  const frames = getEventFrames(event);
+  if (frames.length === 0) return base;
+  const framesText = frames
+    .map((f) => {
+      const parts = [f.functionName, f.sourcePath, f.generatedPath];
+      return parts.filter((p): p is string => Boolean(p)).join(" ");
+    })
+    .join(" ")
+    .toLowerCase();
+  return `${base} ${framesText}`;
 }
 
 export function formatEvent(event: McEvent): string {
