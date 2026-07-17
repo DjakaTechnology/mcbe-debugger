@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <title>Voxel Debugger</title>
+  <desc>An isometric emerald voxel framed by code brackets with a debugger breakpoint.</desc>
+
+  <!-- Opaque indigo field keeps the mark legible on every desktop surface. -->
+  <rect width="1024" height="1024" fill="#0b1024"/>
+
+  <!-- Code brackets sit behind the cube and remain legible at small sizes. -->
+  <path d="M274 246H190c-22 0-40 18-40 40v452c0 22 18 40 40 40h84"
+        fill="none" stroke="#8af5d1" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M750 246h84c22 0 40 18 40 40v452c0 22-18 40-40 40h-84"
+        fill="none" stroke="#8af5d1" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- Isometric voxel: a simple three-plane silhouette, not a game texture. -->
+  <defs>
+    <linearGradient id="top" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#b4ffe4"/>
+      <stop offset="1" stop-color="#36d6a1"/>
+    </linearGradient>
+    <linearGradient id="left" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1fae8e"/>
+      <stop offset="1" stop-color="#11766f"/>
+    </linearGradient>
+    <linearGradient id="right" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#228aa0"/>
+      <stop offset="1" stop-color="#2448a5"/>
+    </linearGradient>
+  </defs>
+
+  <path d="M512 166 808 328 512 492 216 328Z" fill="url(#top)" stroke="#071a2c" stroke-width="22" stroke-linejoin="round"/>
+  <path d="M216 328 512 492v366L216 696Z" fill="url(#left)" stroke="#071a2c" stroke-width="22" stroke-linejoin="round"/>
+  <path d="M512 492 808 328v368L512 858Z" fill="url(#right)" stroke="#071a2c" stroke-width="22" stroke-linejoin="round"/>
+
+  <!-- A single high-contrast breakpoint/node gives the cube a debugging meaning. -->
+  <path d="M596 626 708 564" fill="none" stroke="#071a2c" stroke-width="24" stroke-linecap="round"/>
+  <circle cx="596" cy="626" r="54" fill="#071a2c"/>
+  <circle cx="596" cy="626" r="29" fill="#ffbd6b"/>
+  <circle cx="596" cy="626" r="11" fill="#fff0c7"/>
+</svg>
