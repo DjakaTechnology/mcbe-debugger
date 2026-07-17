@@ -6,7 +6,7 @@ members = [
     "crates/mc-session",
     "adapters/mc-dap-server",
     "adapters/mc-tauri",
-    "apps/tauri-standalone/src-tauri",
+    "apps/mc-desktop/src-tauri",
     "apps/zed-extension",
     "apps/mc-tui",
 ]

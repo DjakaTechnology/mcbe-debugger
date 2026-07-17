@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "tauri-standalone",
+      "name": "mc-desktop",
       "dependencies": {
         "@lucide/svelte": "^1",
         "@tailwindcss/vite": "^4",

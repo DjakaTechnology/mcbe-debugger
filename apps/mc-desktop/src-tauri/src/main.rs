@@ -2,5 +2,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    tauri_standalone_lib::run()
+    mc_desktop_lib::run()
 }

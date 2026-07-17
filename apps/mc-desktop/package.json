@@ -1,7 +1,7 @@
 {
-  "name": "tauri-standalone",
+  "name": "mc-desktop",
   "version": "0.1.0",
-  "description": "",
+  "description": "Desktop application for the Minecraft Bedrock debugger",
   "type": "module",
   "scripts": {
     "dev": "vite dev",

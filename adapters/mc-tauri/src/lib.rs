@@ -255,7 +255,7 @@ impl Default for AppState {
 
 // ─── Public free functions ────────────────────────────────────────────
 //
-// Signatures remain compatible with `apps/tauri-standalone/src-tauri/src/lib.rs`.
+// Signatures remain compatible with `apps/mc-desktop/src-tauri/src/lib.rs`.
 
 pub async fn listen_to_minecraft(
     state: &AppState,

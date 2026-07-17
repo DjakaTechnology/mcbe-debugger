@@ -1,14 +1,18 @@
 [package]
-name = "tauri-standalone"
+name = "mc-desktop"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "Standalone Minecraft Bedrock debugger"
+description = "Desktop application for the Minecraft Bedrock debugger"
+
+[[bin]]
+name = "minecraft-debugger"
+path = "src/main.rs"
 
 [lib]
-name = "tauri_standalone_lib"
+name = "mc_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]

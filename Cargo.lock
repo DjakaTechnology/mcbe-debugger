@@ -2470,6 +2470,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mc-desktop"
+version = "0.1.0"
+dependencies = [
+ "mc-tauri",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-opener",
+ "tauri-plugin-store",
+]
+
+[[package]]
 name = "mc-protocol"
 version = "0.1.0"
 dependencies = [
@@ -4498,19 +4511,6 @@ dependencies = [
  "webview2-com",
  "windows",
  "wry",
-]
-
-[[package]]
-name = "tauri-standalone"
-version = "0.1.0"
-dependencies = [
- "mc-tauri",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-opener",
- "tauri-plugin-store",
 ]
 
 [[package]]
