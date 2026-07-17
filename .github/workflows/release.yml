@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rust_target: x86_64-pc-windows-msvc
+            bundles: msi,nsis
+            platform: windows-x86_64
+          - os: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            bundles: deb,appimage
+            platform: linux-x86_64
+          - os: macos-latest
+            rust_target: x86_64-apple-darwin
+            bundles: dmg
+            platform: macos-x86_64
+          - os: macos-latest
+            rust_target: aarch64-apple-darwin
+            bundles: dmg
+            platform: macos-aarch64
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Linux Tauri dependencies
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential curl file libayatana-appindicator3-dev libssl-dev \
+            libwebkit2gtk-4.1-dev libxdo-dev librsvg2-dev patchelf xdg-utils \
+            wget
+
+      - name: Install frontend dependencies
+        working-directory: apps/mc-desktop
+        run: bun install --frozen-lockfile
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: .
+
+      - name: Validate release tag version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun -e '
+            const fs = require("fs");
+            const tag = process.env.RELEASE_TAG ?? "";
+            if (!/^v\d+\.\d+\.\d+$/.test(tag)) {
+              throw new Error(`Release tag must be vX.Y.Z, got ${tag}`);
+            }
+            const expected = tag.slice(1);
+            const cargo = fs.readFileSync("Cargo.toml", "utf8");
+            const workspace = cargo.match(/\[workspace\.package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
+            const packageVersion = JSON.parse(fs.readFileSync("apps/mc-desktop/package.json", "utf8")).version;
+            const tauriVersion = JSON.parse(fs.readFileSync("apps/mc-desktop/src-tauri/tauri.conf.json", "utf8")).version;
+            const versions = { "Cargo.toml [workspace.package]": workspace, "apps/mc-desktop/package.json": packageVersion, "tauri.conf.json": tauriVersion };
+            for (const [file, version] of Object.entries(versions)) {
+              if (version !== expected) throw new Error(`${file} version ${version ?? "missing"} does not match tag ${tag}`);
+            }
+            console.log(`Validated ${tag} against all release manifests`);
+          '
+
+      - name: Check frontend
+        working-directory: apps/mc-desktop
+        run: bun run check
+
+      - name: Build desktop installers
+        working-directory: apps/mc-desktop
+        run: bun run tauri build --ci --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundles }}"
+
+      - name: Build TUI
+        run: cargo build --release --package mc-tui --target "${{ matrix.rust_target }}"
+
+      - name: Collect native installers and archive TUI (Unix)
+        if: runner.os != 'Windows'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/release/$PLATFORM"
+          mkdir -p "$stage"
+          bundle_root="target/$RUST_TARGET/release/bundle"
+          installer_count=0
+          while IFS= read -r -d '' installer; do
+            cp "$installer" "$stage/"
+            installer_count=$((installer_count + 1))
+          done < <(find "$bundle_root" -type f \( -name '*.deb' -o -name '*.AppImage' -o -name '*.dmg' \) -print0)
+          if ((installer_count == 0)); then
+            echo "No native installers found below $bundle_root" >&2
+            exit 1
+          fi
+          tar -czf "$stage/minecraft-debugger-tui-$PLATFORM.tar.gz" -C "target/$RUST_TARGET/release" mc-tui
+
+      - name: Collect native installers and archive TUI (Windows)
+        if: runner.os == 'Windows'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          RUST_TARGET: ${{ matrix.rust_target }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/release/$PLATFORM"
+          mkdir -p "$stage"
+          bundle_root="target/$RUST_TARGET/release/bundle"
+          installer_count=0
+          while IFS= read -r -d '' installer; do
+            cp "$installer" "$stage/"
+            installer_count=$((installer_count + 1))
+          done < <(find "$bundle_root" -type f \( -name '*.msi' -o -name '*-setup.exe' \) -print0)
+          if ((installer_count == 0)); then
+            echo "No native installers found below $bundle_root" >&2
+            exit 1
+          fi
+          cp "target/$RUST_TARGET/release/mc-tui.exe" "$stage/mc-tui.exe"
+          (cd "$stage" && 7z a -tzip "minecraft-debugger-tui-$PLATFORM.zip" "mc-tui.exe")
+          rm "$stage/mc-tui.exe"
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}
+          path: ${{ runner.temp }}/release/${{ matrix.platform }}/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v5
+        with:
+          pattern: release-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft --generate-notes --title "Minecraft Debugger $RELEASE_TAG"
+          fi
+          mapfile -d '' files < <(find release-artifacts -type f -print0)
+          if ((${#files[@]} == 0)); then
+            echo "No release artifacts were downloaded" >&2
+            exit 1
+          fi
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber "${files[@]}"
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

@@ -123,3 +123,13 @@ apps/
 ## License
 
 MIT. See the workspace manifests for package licensing metadata.
+
+## Releases
+
+Releases are built automatically from tags matching `vX.Y.Z` for Windows, Linux, and macOS (including Apple Silicon). Each GitHub Release contains native desktop installers and a platform-specific TUI archive. The tag version must match the versions in the workspace, desktop `package.json`, and Tauri configuration. To publish a release, run:
+
+```text
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The generated artifacts are currently unsigned. Windows SmartScreen and macOS Gatekeeper may therefore display unknown-developer warnings.
