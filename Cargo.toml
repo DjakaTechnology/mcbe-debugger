@@ -8,6 +8,7 @@ members = [
     "adapters/mc-tauri",
     "apps/tauri-standalone/src-tauri",
     "apps/zed-extension",
+    "apps/mc-tui",
 ]
 
 [workspace.package]
@@ -42,3 +43,6 @@ mc-source-maps = { path = "crates/mc-source-maps" }
 mc-session = { path = "crates/mc-session" }
 mc-dap-server = { path = "adapters/mc-dap-server" }
 mc-tauri = { path = "adapters/mc-tauri" }
+
+ratatui = "0.30.2"
+crossterm = "0.29.0"

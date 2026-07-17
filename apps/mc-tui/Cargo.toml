@@ -1,19 +1,24 @@
 [package]
-name = "mc-tauri"
+name = "mc-tui"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+publish = false
+description = "Workspace-local terminal UI for the Minecraft debugger"
 
 [dependencies]
-mc-protocol.workspace = true
 mc-session.workspace = true
+mc-protocol.workspace = true
+tokio.workspace = true
+clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri.workspace = true
-tokio.workspace = true
+ratatui.workspace = true
+crossterm.workspace = true
 
 [dev-dependencies]
-bytes.workspace = true
 tokio-util.workspace = true
+bytes.workspace = true
+serde.workspace = true

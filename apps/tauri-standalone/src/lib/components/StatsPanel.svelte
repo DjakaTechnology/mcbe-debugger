@@ -18,6 +18,8 @@
     formatMemoryValue,
     makeChartOptions,
     getClientId,
+    getSubscriberAddon,
+    getSubscriberEvent,
   } from "$lib/stats.js";
 
   let {
@@ -25,15 +27,21 @@
     activeCategory,
     selectedClient,
     clientIds,
+    selectedAddon,
+    addonIds,
     onCategoryChange,
     onClientChange,
+    onAddonChange,
   }: {
     categorizedGroups: StatCategory[];
     activeCategory: string;
     selectedClient: string | "all";
     clientIds: string[];
+    selectedAddon: string | "all";
+    addonIds: string[];
     onCategoryChange: (cat: string) => void;
     onClientChange: (client: string | "all") => void;
+    onAddonChange: (addon: string | "all") => void;
   } = $props();
 
   const categoryIcons: Record<string, any> = {
@@ -52,6 +60,9 @@
 
   let showClientDropdown = $derived(
     (activeCategory === "all" || activeCategory === "client") && clientIds.length > 1,
+  );
+  let showAddonDropdown = $derived(
+    (activeCategory === "all" || activeCategory === "scripting") && addonIds.length > 0,
   );
 </script>
 
@@ -90,9 +101,10 @@
         <p class="text-sm">No stats yet. Make sure your add-on is running.</p>
       </div>
     {:else}
-      {#if showClientDropdown}
-        <div class="mb-4 flex items-center gap-2">
-          <span class="text-xs font-medium text-zinc-500 dark:text-zinc-400">Client</span>
+      {#if showClientDropdown || showAddonDropdown}
+        <div class="mb-4 flex flex-wrap items-center gap-2">
+          {#if showClientDropdown}
+            <span class="text-xs font-medium text-zinc-500 dark:text-zinc-400">Client</span>
           <select
             value={selectedClient}
             onchange={(e) => onClientChange(e.currentTarget.value as string | "all")}
@@ -103,6 +115,20 @@
               <option value={clientId}>{clientId}</option>
             {/each}
           </select>
+          {/if}
+          {#if showAddonDropdown}
+            <span class="ml-2 text-xs font-medium text-zinc-500 dark:text-zinc-400">Addon</span>
+            <select
+              value={selectedAddon}
+              onchange={(e) => onAddonChange(e.currentTarget.value as string | "all")}
+              class="rounded-md border border-zinc-300 bg-white px-2 py-1 text-xs text-zinc-900 outline-none transition-colors focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+            >
+              <option value="all">All addons</option>
+              {#each addonIds as addonId}
+                <option value={addonId}>{addonId}</option>
+              {/each}
+            </select>
+          {/if}
         </div>
       {/if}
 
@@ -147,10 +173,11 @@
               </div>
             {:else}
               {@const activeSeries = group.series.filter((s) => !isEmptySeries(s))}
-              {@const filteredSeries = category.key === "client" && selectedClient !== "all" ? activeSeries.filter((s) => getClientId(s.path) === selectedClient) : activeSeries}
+              {@const clientFiltered = category.key === "client" && selectedClient !== "all" ? activeSeries.filter((s) => getClientId(s.path) === selectedClient) : activeSeries}
+              {@const filteredSeries = group.name === "fine_grained_subscribers" && selectedAddon !== "all" ? clientFiltered.filter((s) => getSubscriberAddon(s.path) === selectedAddon) : clientFiltered}
               {@const displaySeries = filteredSeries.map((s) => scaleSeriesForDisplay(s, group.name))}
               {#if displaySeries.length > 0}
-                {@const seriesNames = displaySeries.map((s) => shortName(s.path))}
+                {@const seriesNames = displaySeries.map((s) => selectedAddon !== "all" && group.name === "fine_grained_subscribers" ? (getSubscriberEvent(s.path) ?? shortName(s.path)) : shortName(s.path))}
                 {@const groupData = buildGroupData(displaySeries)}
                 {@const rawLastVal = filteredSeries[0]?.values[filteredSeries[0]?.values.length - 1]}
                 <div class="group/card rounded-xl border border-zinc-200 bg-white p-4 shadow-sm transition-all hover:border-indigo-200 hover:shadow-md dark:border-zinc-800 dark:bg-zinc-950 dark:hover:border-indigo-900/50">
@@ -159,7 +186,7 @@
                       <h3 class="truncate text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">{group.name}</h3>
                       <p class="truncate text-[10px] text-zinc-500 dark:text-zinc-400">
                         {#if displaySeries.length === 1}
-                          {shortName(displaySeries[0].path)}
+                          {seriesNames[0]}
                         {:else}
                           {displaySeries.length} series
                         {/if}

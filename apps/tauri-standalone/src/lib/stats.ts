@@ -203,6 +203,22 @@ export function getClientId(path: string): string | null {
   return parts[1];
 }
 
+/**
+ * Read the addon from a flattened subscriber path. Dotted addon IDs are
+ * ambiguous in this format, so the first component is always treated as the
+ * addon; this helper never attempts to reconstruct one.
+ */
+export function getSubscriberAddon(path: string): string | null {
+  const parts = path.split(".");
+  if (parts.length < 3 || parts[0] !== "fine_grained_subscribers" || parts.some((part) => part.length === 0)) return null;
+  return parts[1];
+}
+
+export function getSubscriberEvent(path: string): string | null {
+  if (getSubscriberAddon(path) === null) return null;
+  return path.split(".").slice(2).join(".");
+}
+
 export function buildChartGroups(statsCollection: Record<string, StatSeries>) {
   const groups: Record<string, { name: string; series: StatSeries[] }> = {};
   for (const series of Object.values(statsCollection)) {
@@ -231,6 +247,15 @@ export function buildClientIds(statsCollection: Record<string, StatSeries>): str
   for (const series of Object.values(statsCollection)) {
     const clientId = getClientId(series.path);
     if (clientId) ids.add(clientId);
+  }
+  return Array.from(ids).sort();
+}
+
+export function buildSubscriberAddonIds(statsCollection: Record<string, StatSeries>): string[] {
+  const ids = new Set<string>();
+  for (const series of Object.values(statsCollection)) {
+    const addon = getSubscriberAddon(series.path);
+    if (addon) ids.add(addon);
   }
   return Array.from(ids).sort();
 }

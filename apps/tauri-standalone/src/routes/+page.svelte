@@ -11,7 +11,7 @@
   import BarChart3 from "@lucide/svelte/icons/bar-chart-3";
 
   import type { McEvent, HandshakeInfo, ResponsePayload, StatSeries, PluginInfo } from "$lib/types.js";
-  import { accumulateStats, buildChartGroups, buildCategorizedGroups, buildClientIds, kindOrder } from "$lib/stats.js";
+  import { accumulateStats, buildChartGroups, buildCategorizedGroups, buildClientIds, buildSubscriberAddonIds, kindOrder } from "$lib/stats.js";
   import { formatEvent } from "$lib/events.js";
   import {
     loadConfig,
@@ -80,6 +80,7 @@
 
   let activeStatsCategory = $state<string>("all");
   let selectedClient = $state<string | "all">("all");
+  let selectedAddon = $state<string | "all">("all");
 
   // ── Target selection modal state ─────────────────────────────────────
   let targetSelectionPlugins = $state<PluginInfo[] | null>(null);
@@ -134,6 +135,11 @@
   let chartGroups = $derived.by(() => buildChartGroups(statsCollection));
   let categorizedGroups = $derived.by(() => buildCategorizedGroups(chartGroups));
   let clientIds = $derived.by(() => buildClientIds(statsCollection));
+  let addonIds = $derived.by(() => buildSubscriberAddonIds(statsCollection));
+
+  $effect(() => {
+    if (selectedAddon !== "all" && !addonIds.includes(selectedAddon)) selectedAddon = "all";
+  });
 
   onMount(() => {
     let unlistens: Array<() => void> = [];
@@ -598,8 +604,11 @@
         activeCategory={activeStatsCategory}
         {selectedClient}
         {clientIds}
+        {selectedAddon}
+        {addonIds}
         onCategoryChange={(c) => (activeStatsCategory = c)}
         onClientChange={(c) => (selectedClient = c)}
+        onAddonChange={(a) => (selectedAddon = a)}
       />
     {/if}
 
