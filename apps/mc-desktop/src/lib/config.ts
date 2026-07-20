@@ -1,5 +1,5 @@
 import { Store } from "@tauri-apps/plugin-store";
-import type { McEvent } from "./types.js";
+import type { LogLevel, McEvent } from "./types.js";
 
 // ── Versioned config shape ────────────────────────────────────────────
 
@@ -10,7 +10,9 @@ export interface AppConfigV1 {
   lastTargetModuleUuid: string;
   searchQuery: string;
   kindFilters: Record<string, boolean>;
-  logLevel: "all" | 0 | 1 | 2;
+  logLevel: "all" | LogLevel;
+  sourceMapPath: string;
+  workspaceRoot: string;
 }
 
 export type AppConfig = AppConfigV1;
@@ -35,7 +37,7 @@ const VALID_KINDS: McEvent["kind"][] = [
 
 const DEFAULT_KIND_FILTERS: Record<string, boolean> = {};
 for (const k of VALID_KINDS) {
-  DEFAULT_KIND_FILTERS[k] = true;
+  DEFAULT_KIND_FILTERS[k] = false;
 }
 
 const DEFAULT_CONFIG: AppConfig = {
@@ -46,6 +48,8 @@ const DEFAULT_CONFIG: AppConfig = {
   searchQuery: "",
   kindFilters: { ...DEFAULT_KIND_FILTERS },
   logLevel: "all",
+  sourceMapPath: "",
+  workspaceRoot: "",
 };
 
 // ── Sanitize / merge ─────────────────────────────────────────────────
@@ -87,11 +91,21 @@ function sanitize(raw: unknown): AppConfig {
   } else {
     Object.assign(kindFilters, DEFAULT_KIND_FILTERS);
   }
+  // "All selected" and "none selected" both show every kind. Store the
+  // canonical empty selection so chips default to visually unselected.
+  if (VALID_KINDS.every((kind) => kindFilters[kind])) {
+    for (const kind of VALID_KINDS) kindFilters[kind] = false;
+  }
 
   // logLevel
   const rawLevel = r.logLevel;
   const logLevel: AppConfig["logLevel"] =
-    rawLevel === "all" || rawLevel === 0 || rawLevel === 1 || rawLevel === 2
+    rawLevel === "all" ||
+    rawLevel === 0 ||
+    rawLevel === 1 ||
+    rawLevel === 2 ||
+    rawLevel === 3 ||
+    rawLevel === 4
       ? (rawLevel as AppConfig["logLevel"])
       : DEFAULT_CONFIG.logLevel;
 
@@ -107,6 +121,10 @@ function sanitize(raw: unknown): AppConfig {
       typeof r.searchQuery === "string" ? r.searchQuery : DEFAULT_CONFIG.searchQuery,
     kindFilters,
     logLevel,
+    sourceMapPath:
+      typeof r.sourceMapPath === "string" ? r.sourceMapPath : DEFAULT_CONFIG.sourceMapPath,
+    workspaceRoot:
+      typeof r.workspaceRoot === "string" ? r.workspaceRoot : DEFAULT_CONFIG.workspaceRoot,
   };
 }
 
@@ -186,7 +204,7 @@ export function saveKnownPlugins(
 export function saveFilterState(
   searchQuery: string,
   kindFilters: Record<string, boolean>,
-  logLevel: "all" | 0 | 1 | 2,
+  logLevel: "all" | LogLevel,
 ): void {
   if (!_config) return;
   _config.searchQuery = searchQuery;
@@ -196,5 +214,17 @@ export function saveFilterState(
   }
   _config.kindFilters = sanitized;
   _config.logLevel = logLevel;
+  scheduleSave();
+}
+
+export function saveSourceMapPath(sourceMapPath: string): void {
+  if (!_config) return;
+  _config.sourceMapPath = sourceMapPath;
+  scheduleSave();
+}
+
+export function saveWorkspaceRoot(workspaceRoot: string): void {
+  if (!_config) return;
+  _config.workspaceRoot = workspaceRoot;
   scheduleSave();
 }

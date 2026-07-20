@@ -2500,9 +2500,9 @@ fn render_filter_popup(frame: &mut Frame, app: &App, area: Rect, compact: bool) 
         let marker = if enabled { "[x]" } else { "[ ]" };
         let prefix = if selected { "▸ " } else { "  " };
         let color = match level {
-            LogLevel::Log => THEME.text,
+            LogLevel::Verbose | LogLevel::Log => THEME.text,
             LogLevel::Warn => THEME.accent_warn,
-            LogLevel::Error => THEME.accent_err,
+            LogLevel::Error | LogLevel::Stop => THEME.accent_err,
         };
         lines.push(Line::from(vec![
             Span::styled(

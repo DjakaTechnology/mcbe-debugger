@@ -393,17 +393,17 @@ impl LogLevelFilter {
 
     pub fn get(&self, level: LogLevel) -> bool {
         match level {
-            LogLevel::Log => self.log,
+            LogLevel::Verbose | LogLevel::Log => self.log,
             LogLevel::Warn => self.warn,
-            LogLevel::Error => self.error,
+            LogLevel::Error | LogLevel::Stop => self.error,
         }
     }
 
     pub fn set(&mut self, level: LogLevel, value: bool) {
         match level {
-            LogLevel::Log => self.log = value,
+            LogLevel::Verbose | LogLevel::Log => self.log = value,
             LogLevel::Warn => self.warn = value,
-            LogLevel::Error => self.error = value,
+            LogLevel::Error | LogLevel::Stop => self.error = value,
         }
     }
 }
@@ -2270,17 +2270,21 @@ pub fn format_debuggee_event(event: &DebuggeeEvent) -> String {
         }
         DebuggeeEvent::Print { message, log_level } => {
             let level = match log_level {
+                LogLevel::Verbose => "VERBOSE",
                 LogLevel::Log => "LOG",
                 LogLevel::Warn => "WARN",
                 LogLevel::Error => "ERROR",
+                LogLevel::Stop => "STOP",
             };
             format!("[{level}] {message}")
         }
         DebuggeeEvent::Notification { message, log_level } => {
             let level = match log_level {
+                LogLevel::Verbose => "VERBOSE",
                 LogLevel::Log => "LOG",
                 LogLevel::Warn => "WARN",
                 LogLevel::Error => "ERROR",
+                LogLevel::Stop => "STOP",
             };
             format!("[{level}] {message}")
         }

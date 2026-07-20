@@ -3,6 +3,22 @@ fn adapter_info() -> mc_tauri::AdapterInfo {
     mc_tauri::adapter_info()
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn set_source_map_path(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    source_map_path: Option<String>,
+) -> mc_tauri::WorkspaceMapStatus {
+    mc_tauri::set_source_map_path(&state, source_map_path)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn set_workspace_root(
+    state: tauri::State<'_, mc_tauri::AppState>,
+    workspace_root: Option<String>,
+) -> Result<mc_tauri::WorkspaceSelection, String> {
+    mc_tauri::set_workspace_root(&state, workspace_root)
+}
+
 #[tauri::command]
 async fn listen_to_minecraft(
     state: tauri::State<'_, mc_tauri::AppState>,
@@ -109,12 +125,24 @@ async fn evaluate(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    #[cfg(debug_assertions)]
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off")),
+        )
+        .with_target(true)
+        .try_init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_dialog::init())
         .manage(mc_tauri::AppState::new())
         .invoke_handler(tauri::generate_handler![
             adapter_info,
+            set_source_map_path,
+            set_workspace_root,
             listen_to_minecraft,
             connect_to_minecraft,
             disconnect,

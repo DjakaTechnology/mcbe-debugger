@@ -37,6 +37,7 @@ tauri = "2"
 tauri-build = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-store = "2"
+tauri-plugin-dialog = "2"
 
 mc-protocol = { path = "crates/mc-protocol" }
 mc-source-maps = { path = "crates/mc-source-maps" }

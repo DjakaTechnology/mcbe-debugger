@@ -10,7 +10,9 @@ pub struct MessageCodec {
 enum CodecState {
     #[default]
     WaitingForHeader,
-    WaitingForPayload { length: usize },
+    WaitingForPayload {
+        length: usize,
+    },
 }
 
 impl MessageCodec {
@@ -54,6 +56,14 @@ impl Decoder for MessageCodec {
                     if payload[length - 1] != b'\n' {
                         return Err(invalid_data("expected newline after payload"));
                     }
+                    #[cfg(debug_assertions)]
+                    tracing::debug!(
+                        target: "mc_protocol::wire",
+                        direction = "inbound",
+                        bytes = length - 1,
+                        payload = %String::from_utf8_lossy(&payload[..length - 1]),
+                        "raw Minecraft debugger payload"
+                    );
                     let value: serde_json::Value =
                         serde_json::from_slice(&payload[..length - 1])
                             .map_err(|e| invalid_data(format!("invalid JSON: {e}")))?;
@@ -79,11 +89,7 @@ impl Decoder for MessageCodec {
 impl Encoder<serde_json::Value> for MessageCodec {
     type Error = std::io::Error;
 
-    fn encode(
-        &mut self,
-        item: serde_json::Value,
-        buf: &mut BytesMut,
-    ) -> Result<(), Self::Error> {
+    fn encode(&mut self, item: serde_json::Value, buf: &mut BytesMut) -> Result<(), Self::Error> {
         let json = serde_json::to_vec(&item)
             .map_err(|e| invalid_data(format!("JSON serialization failed: {e}")))?;
         let length = json.len() + 1;

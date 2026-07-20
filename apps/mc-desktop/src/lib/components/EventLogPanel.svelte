@@ -14,8 +14,18 @@
   import Layers from "@lucide/svelte/icons/layers";
   import AlertCircle from "@lucide/svelte/icons/alert-circle";
   import HelpCircle from "@lucide/svelte/icons/help-circle";
-  import type { McEvent } from "$lib/types.js";
-  import { formatEvent, eventIcon, eventColor } from "$lib/events.js";
+  import MapPin from "@lucide/svelte/icons/map-pin";
+  import FileCode from "@lucide/svelte/icons/file-code";
+  import type { LogLevel, McEvent, SourceFrame } from "$lib/types.js";
+  import {
+    formatEvent,
+    eventIcon,
+    eventColor,
+    frameLabel,
+    frameTitle,
+    getEventFrames,
+    frameVisibleInMessage,
+  } from "$lib/events.js";
   import { kindOrder } from "$lib/stats.js";
 
   let {
@@ -26,6 +36,7 @@
     logLevel,
     onSearchChange,
     onKindToggle,
+    onClearEventKinds,
     onLogLevelChange,
     onClearLog,
     onResetFilters,
@@ -34,13 +45,27 @@
     filteredEvents: McEvent[];
     searchQuery: string;
     kindFilters: Record<McEvent["kind"], boolean>;
-    logLevel: "all" | 0 | 1 | 2;
+    logLevel: "all" | LogLevel;
     onSearchChange: (q: string) => void;
     onKindToggle: (kind: McEvent["kind"]) => void;
-    onLogLevelChange: (level: "all" | 0 | 1 | 2) => void;
+    onClearEventKinds: () => void;
+    onLogLevelChange: (level: "all" | LogLevel) => void;
     onClearLog: () => void;
     onResetFilters: () => void;
   } = $props();
+
+  // Subordinate source-frame rows for an event. The raw message is always
+  // preserved verbatim; a frame is suppressed only when the message already
+  // shows that same frame's location (mapped source path for mapped frames,
+  // generated path for unmapped frames). Function names are never used as a
+  // suppression key, so a mapped original source row still surfaces even when
+  // the raw stack mentions the function name.
+  function visibleFramesFor(event: McEvent): SourceFrame[] {
+    if (event.kind !== "print" && event.kind !== "notification") return [];
+    const frames = getEventFrames(event);
+    if (frames.length === 0) return [];
+    return frames.filter((f) => frameVisibleInMessage(f, event.message));
+  }
 
   let logElement = $state<HTMLDivElement | null>(null);
   let filterOpen = $state(false);
@@ -67,7 +92,8 @@
   let activeFilterCount = $derived.by(() => {
     let count = 0;
     if (searchQuery.trim()) count++;
-    if (Object.values(kindFilters).some((v) => !v)) count++;
+    const kindValues = Object.values(kindFilters);
+    if (kindValues.some(Boolean) && kindValues.some((value) => !value)) count++;
     if (logLevel !== "all") count++;
     return count;
   });
@@ -87,10 +113,14 @@
 
   const logLevels = [
     { label: "All", value: "all" },
-    { label: "LOG", value: 0 },
-    { label: "WARN", value: 1 },
-    { label: "ERROR", value: 2 },
+    { label: "Verbose", value: 0 },
+    { label: "Log", value: 1 },
+    { label: "Warn", value: 2 },
+    { label: "Error", value: 3 },
+    { label: "Stop", value: 4 },
   ] as const;
+
+  const eventLogKinds = kindOrder.filter((kind) => kind !== "stat2");
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col p-4">
@@ -146,7 +176,7 @@
                       <button
                         type="button"
                         onclick={() => onLogLevelChange(level.value as typeof logLevel)}
-                        class="px-2.5 py-1 text-[10px] font-semibold uppercase transition-colors {logLevel === level.value
+                        class="flex-1 px-1 py-1 text-[9px] font-semibold uppercase transition-colors {logLevel === level.value
                           ? 'rounded-md bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
                           : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300'}"
                       >
@@ -157,9 +187,21 @@
                 </div>
 
                 <div class="space-y-1.5">
-                  <span class="block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Event kinds</span>
+                  <div class="flex items-center justify-between">
+                    <span class="text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Event kinds</span>
+                    <button
+                      type="button"
+                      onclick={onClearEventKinds}
+                      disabled={!Object.values(kindFilters).some(Boolean)}
+                      aria-label="Clear event kinds"
+                      title="No selected kinds shows all events"
+                      class="text-[10px] font-medium text-indigo-600 transition-colors hover:text-indigo-700 disabled:cursor-not-allowed disabled:text-zinc-300 dark:text-indigo-400 dark:hover:text-indigo-300 dark:disabled:text-zinc-700"
+                    >
+                      Clear all
+                    </button>
+                  </div>
                   <div class="flex flex-wrap gap-1.5">
-                    {#each kindOrder as kind}
+                    {#each eventLogKinds as kind}
                       {@const Icon = iconComponents[eventIcon(kind)]}
                       <button
                         type="button"
@@ -216,9 +258,44 @@
         <ul class="space-y-0.5 font-mono text-xs">
           {#each filteredEvents as event, i (i)}
             {@const Icon = iconComponents[eventIcon(event.kind)]}
-            <li class="flex items-start gap-2 rounded-md px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900">
-              <Icon class="mt-0.5 h-3.5 w-3.5 shrink-0 {eventColor(event.kind)}" />
-              <span class="break-all text-zinc-700 dark:text-zinc-300">{formatEvent(event)}</span>
+            {@const frames = visibleFramesFor(event)}
+            <li class="rounded-md px-2 py-1.5 transition-colors hover:bg-zinc-50 dark:hover:bg-zinc-900">
+              <div class="flex items-start gap-2">
+                <Icon class="mt-0.5 h-3.5 w-3.5 shrink-0 {eventColor(event.kind)}" />
+                <div class="min-w-0 flex-1">
+                  <span class="break-all text-zinc-700 dark:text-zinc-300">{formatEvent(event)}</span>
+                  {#if frames.length > 0}
+                    <ul
+                      class="mt-1 space-y-0.5 border-l border-zinc-200 pl-2 dark:border-zinc-700"
+                      aria-label="Source frames"
+                    >
+                      {#each frames as frame, fi (fi)}
+                        <li class="flex items-start gap-1.5 text-[11px] leading-snug">
+                          {#if frame.mapped}
+                            <MapPin
+                              class="mt-px h-3 w-3 shrink-0 text-emerald-500 dark:text-emerald-400"
+                              aria-label="Mapped source frame"
+                            />
+                          {:else}
+                            <FileCode
+                              class="mt-px h-3 w-3 shrink-0 text-zinc-400 dark:text-zinc-500"
+                              aria-label="Unmapped generated frame"
+                            />
+                          {/if}
+                          <span
+                            class="block min-w-0 flex-1 truncate {frame.mapped
+                              ? 'text-zinc-600 dark:text-zinc-300'
+                              : 'text-zinc-500 dark:text-zinc-400'}"
+                            title={frameTitle(frame)}
+                          >
+                            {frameLabel(frame)}
+                          </span>
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
+              </div>
             </li>
           {/each}
         </ul>

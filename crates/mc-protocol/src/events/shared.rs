@@ -10,9 +10,11 @@ pub struct PluginDetails {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize_repr, Deserialize_repr)]
 #[repr(u8)]
 pub enum LogLevel {
-    Log = 0,
-    Warn = 1,
-    Error = 2,
+    Verbose = 0,
+    Log = 1,
+    Warn = 2,
+    Error = 3,
+    Stop = 4,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
