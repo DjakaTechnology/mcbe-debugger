@@ -92,14 +92,6 @@ impl Encoder<serde_json::Value> for MessageCodec {
     fn encode(&mut self, item: serde_json::Value, buf: &mut BytesMut) -> Result<(), Self::Error> {
         let json = serde_json::to_vec(&item)
             .map_err(|e| invalid_data(format!("JSON serialization failed: {e}")))?;
-        #[cfg(debug_assertions)]
-        tracing::debug!(
-            target: "mc_protocol::wire",
-            direction = "outbound",
-            bytes = json.len(),
-            payload = %String::from_utf8_lossy(&json),
-            "raw Minecraft debugger payload"
-        );
         let length = json.len() + 1;
         buf.extend_from_slice(format!("{:08x}\n", length).as_bytes());
         buf.extend_from_slice(&json);

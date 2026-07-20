@@ -129,7 +129,7 @@ pub fn run() {
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("mc_protocol::wire=debug")),
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("off")),
         )
         .with_target(true)
         .try_init();
