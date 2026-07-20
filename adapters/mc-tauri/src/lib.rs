@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::{env, fs};
 
 use mc_protocol::events::shared::StatDataModel;
 use mc_session::{
@@ -43,6 +44,7 @@ pub struct HandshakeInfo {
     pub version: u8,
     pub plugins: Vec<PluginInfo>,
     pub require_passcode: bool,
+    pub source_map_status: WorkspaceMapStatus,
 }
 
 impl From<SessionHandshakeInfo> for HandshakeInfo {
@@ -58,6 +60,11 @@ impl From<SessionHandshakeInfo> for HandshakeInfo {
                 })
                 .collect(),
             require_passcode: hs.require_passcode,
+            source_map_status: WorkspaceMapStatus {
+                enabled: false,
+                map_path: None,
+                error: None,
+            },
         }
     }
 }
@@ -76,6 +83,67 @@ pub struct WorkspaceMapStatus {
     pub enabled: bool,
     pub map_path: Option<String>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackManifest {
+    header: Option<PackHeader>,
+    #[serde(default)]
+    modules: Vec<PackModule>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackHeader {
+    uuid: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PackModule {
+    #[serde(rename = "type")]
+    module_type: String,
+    uuid: String,
+    entry: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegolithConfig {
+    packs: RegolithPacks,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegolithPacks {
+    #[serde(rename = "behaviorPack")]
+    behavior_pack: String,
+    #[serde(rename = "resourcePack")]
+    resource_pack: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceProject {
+    root: PathBuf,
+    behavior_pack_path: PathBuf,
+    resource_pack_path: Option<PathBuf>,
+    behavior_pack_uuid: Option<String>,
+    resource_pack_uuid: Option<String>,
+    script_module_uuids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceInfo {
+    pub root: String,
+    pub behavior_pack_path: String,
+    pub resource_pack_path: Option<String>,
+    pub behavior_pack_uuid: Option<String>,
+    pub resource_pack_uuid: Option<String>,
+    pub script_module_uuids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSelection {
+    pub workspace: Option<WorkspaceInfo>,
+    pub source_map_status: WorkspaceMapStatus,
 }
 
 /// A JavaScript stack frame extracted from a scripting-log message.
@@ -305,7 +373,11 @@ fn enrich_frames(frames: &mut [ScriptFrame], source_maps: Option<&mc_source_maps
             generated_line,
             generated_column,
         ) {
-            frame.source_path = Some(original.path.to_string_lossy().into_owned());
+            frame.source_path = Some(if original.path.exists() {
+                original.path.to_string_lossy().into_owned()
+            } else {
+                original.source_reference
+            });
             frame.source_line = Some(original.line.saturating_add(1));
             frame.source_column = Some(original.column.saturating_add(1));
             frame.mapped = true;
@@ -379,6 +451,9 @@ pub struct AppState {
     event_rx: Mutex<Option<mpsc::Receiver<SessionEvent>>>,
     bridge_started: std::sync::atomic::AtomicBool,
     source_maps: SharedSourceMaps,
+    selected_module_uuid: RwLock<Option<String>>,
+    manual_source_map_path: RwLock<Option<PathBuf>>,
+    workspace: RwLock<Option<WorkspaceProject>>,
 }
 
 impl AppState {
@@ -389,6 +464,9 @@ impl AppState {
             event_rx: Mutex::new(Some(event_rx)),
             bridge_started: std::sync::atomic::AtomicBool::new(false),
             source_maps: Arc::new(RwLock::new(None)),
+            selected_module_uuid: RwLock::new(None),
+            manual_source_map_path: RwLock::new(None),
+            workspace: RwLock::new(None),
         }
     }
 
@@ -421,54 +499,653 @@ impl Default for AppState {
 //
 // Signatures remain compatible with `apps/mc-desktop/src-tauri/src/lib.rs`.
 
-/// Changes the workspace used for desktop scripting-log source mapping.
+/// Finds and loads the connected behavior pack's source map automatically.
 ///
-/// Empty values disable mapping. Load failures are represented in the returned
-/// status and leave the event bridge running with mapping disabled.
-pub fn set_workspace_root(state: &AppState, workspace_root: Option<String>) -> WorkspaceMapStatus {
-    let Some(workspace_root) = workspace_root.filter(|root| !root.trim().is_empty()) else {
-        *state
-            .source_maps
-            .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        return WorkspaceMapStatus {
-            enabled: false,
-            map_path: None,
-            error: None,
-        };
+/// `MOJANG_DIR` is checked first. On Windows, standard stable and Preview
+/// `com.mojang` directories are fallback candidates. Pack manifests are matched
+/// by the selected script-module UUID, then the module entry is resolved to
+/// either `main.js.map` or `main.map.js` in the pack's scripts directory.
+fn configure_source_maps_for_module(
+    state: &AppState,
+    module_uuid: Option<&str>,
+) -> WorkspaceMapStatus {
+    let Some(module_uuid) = module_uuid else {
+        return replace_source_maps(
+            state,
+            None,
+            WorkspaceMapStatus {
+                enabled: false,
+                map_path: None,
+                error: Some("no connected script module is selected".into()),
+            },
+        );
     };
 
-    let workspace_root = absolute_path(Path::new(workspace_root.trim()));
-    let map_path = workspace_root
-        .join("BP")
-        .join("scripts")
-        .join("main.js.map");
-    let result = mc_source_maps::SourceMaps::from_workspace(&workspace_root);
-    let (maps, error) = match result {
-        Ok(maps) => (Some(maps), None),
-        Err(error) => (None, Some(error.to_string())),
+    let workspace = state
+        .workspace
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(workspace) = workspace {
+        let matches = workspace
+            .script_module_uuids
+            .iter()
+            .any(|uuid| uuid.eq_ignore_ascii_case(module_uuid));
+        if !matches {
+            return replace_source_maps(
+                state,
+                None,
+                WorkspaceMapStatus {
+                    enabled: false,
+                    map_path: None,
+                    error: Some(format!(
+                        "open workspace does not contain connected script module {module_uuid}"
+                    )),
+                },
+            );
+        }
+    }
+
+    let candidates = mojang_dir_candidates();
+    if candidates.is_empty() {
+        return replace_source_maps(
+            state,
+            None,
+            WorkspaceMapStatus {
+                enabled: false,
+                map_path: None,
+                error: Some(
+                    "MOJANG_DIR is not set and no standard com.mojang directory was found".into(),
+                ),
+            },
+        );
+    }
+
+    let mut failures = Vec::new();
+    for mojang_dir in candidates {
+        match find_source_map_for_module(&mojang_dir, module_uuid) {
+            Ok((pack_root, map_path)) => {
+                let source_base = source_base_for_module(state, module_uuid);
+                let loaded = match source_base {
+                    Some(project_root) => {
+                        mc_source_maps::SourceMaps::from_map_file_with_source_base(
+                            &map_path,
+                            &pack_root,
+                            project_root,
+                        )
+                    }
+                    None => mc_source_maps::SourceMaps::from_map_file(&map_path, &pack_root),
+                };
+                return match loaded {
+                    Ok(maps) => replace_source_maps(
+                        state,
+                        Some(maps),
+                        WorkspaceMapStatus {
+                            enabled: true,
+                            map_path: Some(map_path.to_string_lossy().into_owned()),
+                            error: None,
+                        },
+                    ),
+                    Err(error) => replace_source_maps(
+                        state,
+                        None,
+                        WorkspaceMapStatus {
+                            enabled: false,
+                            map_path: Some(map_path.to_string_lossy().into_owned()),
+                            error: Some(error.to_string()),
+                        },
+                    ),
+                };
+            }
+            Err(error) => failures.push(error),
+        }
+    }
+
+    replace_source_maps(
+        state,
+        None,
+        WorkspaceMapStatus {
+            enabled: false,
+            map_path: None,
+            error: Some(failures.join("; ")),
+        },
+    )
+}
+
+/// Sets or clears a manual source-map override. Clearing returns to automatic
+/// detection for the currently selected module.
+pub fn set_source_map_path(
+    state: &AppState,
+    source_map_path: Option<String>,
+) -> WorkspaceMapStatus {
+    let source_map_path = source_map_path
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty());
+    *state
+        .manual_source_map_path
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        source_map_path.as_deref().map(absolute_path);
+
+    if let Some(path) = source_map_path {
+        return configure_source_maps_from_path(state, &absolute_path(&path));
+    }
+
+    let selected = state
+        .selected_module_uuid
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if selected.is_none() {
+        return replace_source_maps(
+            state,
+            None,
+            WorkspaceMapStatus {
+                enabled: false,
+                map_path: None,
+                error: None,
+            },
+        );
+    }
+    configure_source_maps_for_module(state, selected.as_deref())
+}
+
+fn configure_source_maps_from_path(state: &AppState, input: &Path) -> WorkspaceMapStatus {
+    let selected = state
+        .selected_module_uuid
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let (map_path, generated_root) = match resolve_manual_map_path(input, selected.as_deref()) {
+        Ok(location) => location,
+        Err(error) => {
+            return replace_source_maps(
+                state,
+                None,
+                WorkspaceMapStatus {
+                    enabled: false,
+                    map_path: Some(input.to_string_lossy().into_owned()),
+                    error: Some(error),
+                },
+            );
+        }
     };
-    let enabled = maps.is_some();
+    let source_base = project_root_for_path(&map_path).or_else(|| {
+        selected
+            .as_deref()
+            .and_then(|uuid| source_base_for_module(state, uuid))
+    });
+    let loaded = match source_base {
+        Some(source_base) => mc_source_maps::SourceMaps::from_map_file_with_source_base(
+            &map_path,
+            &generated_root,
+            source_base,
+        ),
+        None => mc_source_maps::SourceMaps::from_map_file(&map_path, &generated_root),
+    };
+
+    match loaded {
+        Ok(maps) => replace_source_maps(
+            state,
+            Some(maps),
+            WorkspaceMapStatus {
+                enabled: true,
+                map_path: Some(map_path.to_string_lossy().into_owned()),
+                error: None,
+            },
+        ),
+        Err(error) => replace_source_maps(
+            state,
+            None,
+            WorkspaceMapStatus {
+                enabled: false,
+                map_path: Some(map_path.to_string_lossy().into_owned()),
+                error: Some(error.to_string()),
+            },
+        ),
+    }
+}
+
+fn resolve_manual_map_path(
+    input: &Path,
+    selected_module_uuid: Option<&str>,
+) -> Result<(PathBuf, PathBuf), String> {
+    if input.is_file() {
+        return Ok((input.to_path_buf(), infer_generated_root(input)));
+    }
+    if !input.is_dir() {
+        return Err(format!(
+            "source-map path '{}' does not exist",
+            input.display()
+        ));
+    }
+
+    let pack_roots = [
+        input.to_path_buf(),
+        input.join("BP"),
+        input.join("packs").join("BP"),
+    ];
+    for pack_root in pack_roots {
+        if !pack_root.join("manifest.json").is_file() {
+            continue;
+        }
+        let manifest = read_pack_manifest(&pack_root)?;
+        let script_modules = manifest
+            .modules
+            .iter()
+            .filter(|module| module.module_type == "script")
+            .collect::<Vec<_>>();
+        let selected_modules = if let Some(uuid) = selected_module_uuid {
+            let matching = script_modules
+                .into_iter()
+                .filter(|module| module.uuid.eq_ignore_ascii_case(uuid))
+                .collect::<Vec<_>>();
+            if matching.is_empty() {
+                return Err(format!(
+                    "pack '{}' has no script module matching {uuid}",
+                    pack_root.display()
+                ));
+            }
+            matching
+        } else {
+            script_modules
+        };
+        let maps = selected_modules
+            .into_iter()
+            .flat_map(|module| map_candidates_for_entry(&pack_root, module.entry.as_deref()))
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        match maps.as_slice() {
+            [map_path] => return Ok((map_path.clone(), pack_root)),
+            [] => {}
+            _ => {
+                return Err(format!(
+                    "multiple source maps match '{}'; select a map file directly",
+                    pack_root.display()
+                ));
+            }
+        }
+    }
+
+    let mut maps = Vec::new();
+    collect_map_files(input, &mut maps);
+    let scripts = input.join("scripts");
+    if scripts.is_dir() {
+        collect_map_files(&scripts, &mut maps);
+    }
+    maps.sort();
+    maps.dedup();
+    match maps.as_slice() {
+        [map_path] => Ok((map_path.clone(), infer_generated_root(map_path))),
+        [] => Err(format!(
+            "no source map found at or directly below '{}'",
+            input.display()
+        )),
+        _ => Err(format!(
+            "multiple source maps found below '{}'; select a map file directly",
+            input.display()
+        )),
+    }
+}
+
+fn map_candidates_for_entry(pack_root: &Path, entry: Option<&str>) -> Vec<PathBuf> {
+    let Some(entry) = entry else {
+        return Vec::new();
+    };
+    let generated_path = pack_root.join(portable_relative_path(entry));
+    let mut candidates = vec![PathBuf::from(format!(
+        "{}.map",
+        generated_path.to_string_lossy()
+    ))];
+    if let Some(stem) = generated_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_suffix(".js"))
+    {
+        candidates.push(generated_path.with_file_name(format!("{stem}.map.js")));
+    }
+    candidates
+}
+
+fn collect_map_files(directory: &Path, maps: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    maps.extend(
+        entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.is_file()
+                    && path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.ends_with(".map") || name.ends_with(".map.js"))
+            }),
+    );
+}
+
+fn infer_generated_root(map_path: &Path) -> PathBuf {
+    map_path
+        .parent()
+        .and_then(|parent| {
+            (parent.file_name().and_then(|name| name.to_str()) == Some("scripts"))
+                .then(|| parent.parent())
+                .flatten()
+        })
+        .or_else(|| map_path.parent())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
+}
+
+fn project_root_for_path(path: &Path) -> Option<PathBuf> {
+    path.ancestors()
+        .find(|ancestor| ancestor.join("config.json").is_file())
+        .map(Path::to_path_buf)
+}
+
+fn absolute_path(path: impl AsRef<Path>) -> PathBuf {
+    let path = path.as_ref();
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+fn replace_source_maps(
+    state: &AppState,
+    maps: Option<mc_source_maps::SourceMaps>,
+    status: WorkspaceMapStatus,
+) -> WorkspaceMapStatus {
     *state
         .source_maps
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = maps;
+    status
+}
 
-    WorkspaceMapStatus {
-        enabled,
-        map_path: Some(map_path.to_string_lossy().into_owned()),
-        error,
+fn mojang_dir_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(value) = env::var_os("MOJANG_DIR").filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(value));
+    }
+
+    #[cfg(windows)]
+    if let Some(app_data) = env::var_os("APPDATA") {
+        let app_data = PathBuf::from(app_data);
+        candidates.push(
+            app_data
+                .join("Minecraft Bedrock")
+                .join("Users")
+                .join("Shared")
+                .join("games")
+                .join("com.mojang"),
+        );
+        candidates.push(
+            app_data
+                .join("Minecraft Bedrock Preview")
+                .join("Users")
+                .join("Shared")
+                .join("games")
+                .join("com.mojang"),
+        );
+    }
+
+    candidates.retain(|path| path.is_dir());
+    candidates.dedup();
+    candidates
+}
+
+pub fn set_workspace_root(
+    state: &AppState,
+    workspace_root: Option<String>,
+) -> Result<WorkspaceSelection, String> {
+    let workspace_root = workspace_root
+        .map(|path| path.trim().to_owned())
+        .filter(|path| !path.is_empty());
+    let project = workspace_root
+        .as_deref()
+        .map(absolute_path)
+        .map(load_workspace_project)
+        .transpose()?;
+    *state
+        .workspace
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = project.clone();
+
+    let source_map_status = refresh_source_maps(state);
+    Ok(WorkspaceSelection {
+        workspace: project.map(workspace_info),
+        source_map_status,
+    })
+}
+
+fn load_workspace_project(root: PathBuf) -> Result<WorkspaceProject, String> {
+    let root = fs::canonicalize(&root).unwrap_or(root);
+    let config_path = root.join("config.json");
+    let config_bytes = fs::read(&config_path)
+        .map_err(|error| format!("could not read '{}': {error}", config_path.display()))?;
+    let config: RegolithConfig = serde_json::from_slice(&config_bytes).map_err(|error| {
+        format!(
+            "invalid Regolith config '{}': {error}",
+            config_path.display()
+        )
+    })?;
+
+    let behavior_pack_path = root.join(portable_relative_path(&config.packs.behavior_pack));
+    let behavior_manifest = read_pack_manifest(&behavior_pack_path)?;
+    let resource_pack_path = config
+        .packs
+        .resource_pack
+        .as_deref()
+        .map(|path| root.join(portable_relative_path(path)));
+    let resource_manifest = resource_pack_path
+        .as_deref()
+        .map(read_pack_manifest)
+        .transpose()?;
+    let script_module_uuids = behavior_manifest
+        .modules
+        .iter()
+        .filter(|module| module.module_type == "script")
+        .map(|module| module.uuid.clone())
+        .collect();
+
+    Ok(WorkspaceProject {
+        root,
+        behavior_pack_path,
+        resource_pack_path,
+        behavior_pack_uuid: behavior_manifest.header.map(|header| header.uuid),
+        resource_pack_uuid: resource_manifest
+            .and_then(|manifest| manifest.header.map(|header| header.uuid)),
+        script_module_uuids,
+    })
+}
+
+fn read_pack_manifest(pack_path: &Path) -> Result<PackManifest, String> {
+    let manifest_path = pack_path.join("manifest.json");
+    let bytes = fs::read(&manifest_path)
+        .map_err(|error| format!("could not read '{}': {error}", manifest_path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        format!(
+            "invalid pack manifest '{}': {error}",
+            manifest_path.display()
+        )
+    })
+}
+
+fn source_base_for_module(state: &AppState, module_uuid: &str) -> Option<PathBuf> {
+    let workspace = state
+        .workspace
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(workspace) = workspace {
+        if workspace
+            .script_module_uuids
+            .iter()
+            .any(|uuid| uuid.eq_ignore_ascii_case(module_uuid))
+        {
+            return Some(workspace.root);
+        }
+    }
+
+    env::var_os("REGOLITH_PROJECT_ROOT")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .and_then(|root| load_workspace_project(root).ok())
+        .filter(|project| {
+            project
+                .script_module_uuids
+                .iter()
+                .any(|uuid| uuid.eq_ignore_ascii_case(module_uuid))
+        })
+        .map(|project| project.root)
+}
+
+fn refresh_source_maps(state: &AppState) -> WorkspaceMapStatus {
+    let manual = state
+        .manual_source_map_path
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(path) = manual {
+        return configure_source_maps_from_path(state, &path);
+    }
+    let selected = state
+        .selected_module_uuid
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match selected {
+        Some(uuid) => configure_source_maps_for_module(state, Some(&uuid)),
+        None => replace_source_maps(
+            state,
+            None,
+            WorkspaceMapStatus {
+                enabled: false,
+                map_path: None,
+                error: None,
+            },
+        ),
     }
 }
 
-fn absolute_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .map(|current| current.join(path))
-            .unwrap_or_else(|_| path.to_path_buf())
+fn workspace_info(project: WorkspaceProject) -> WorkspaceInfo {
+    WorkspaceInfo {
+        root: project.root.to_string_lossy().into_owned(),
+        behavior_pack_path: project.behavior_pack_path.to_string_lossy().into_owned(),
+        resource_pack_path: project
+            .resource_pack_path
+            .map(|path| path.to_string_lossy().into_owned()),
+        behavior_pack_uuid: project.behavior_pack_uuid,
+        resource_pack_uuid: project.resource_pack_uuid,
+        script_module_uuids: project.script_module_uuids,
     }
+}
+
+fn portable_relative_path(path: &str) -> PathBuf {
+    path.split(['/', '\\'])
+        .filter(|part| !part.is_empty() && *part != ".")
+        .fold(PathBuf::new(), |path, part| path.join(part))
+}
+
+fn find_source_map_for_module(
+    mojang_dir: &Path,
+    module_uuid: &str,
+) -> Result<(PathBuf, PathBuf), String> {
+    let mut matching_pack_without_map = None;
+
+    for collection in ["development_behavior_packs", "behavior_packs"] {
+        let collection_root = mojang_dir.join(collection);
+        let Ok(entries) = fs::read_dir(&collection_root) else {
+            continue;
+        };
+        let mut pack_roots = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        pack_roots.sort();
+
+        for pack_root in pack_roots {
+            let manifest_path = pack_root.join("manifest.json");
+            let Ok(manifest_bytes) = fs::read(&manifest_path) else {
+                continue;
+            };
+            let Ok(manifest) = serde_json::from_slice::<PackManifest>(&manifest_bytes) else {
+                continue;
+            };
+            let Some(script_module) = manifest.modules.iter().find(|module| {
+                module.module_type == "script" && module.uuid.eq_ignore_ascii_case(module_uuid)
+            }) else {
+                continue;
+            };
+            let generated_path = script_module
+                .entry
+                .as_deref()
+                .map(portable_relative_path)
+                .map(|entry| pack_root.join(entry));
+            let map_candidates =
+                map_candidates_for_entry(&pack_root, script_module.entry.as_deref());
+            if let Some(map_path) = map_candidates.into_iter().find(|path| path.is_file()) {
+                return Ok((pack_root, map_path));
+            }
+            matching_pack_without_map = generated_path;
+        }
+    }
+
+    if let Some(generated_path) = matching_pack_without_map {
+        Err(format!(
+            "connected module {module_uuid} was found, but no source map exists beside '{}'",
+            generated_path.display()
+        ))
+    } else {
+        Err(format!(
+            "connected module {module_uuid} was not found under '{}'",
+            mojang_dir.display()
+        ))
+    }
+}
+
+fn selected_module_uuid(
+    state: &AppState,
+    requested: Option<String>,
+    handshake: &SessionHandshakeInfo,
+) -> Option<String> {
+    requested
+        .or_else(|| {
+            state
+                .selected_module_uuid
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        })
+        .or_else(|| {
+            (handshake.plugins.len() == 1).then(|| handshake.plugins[0].module_uuid.clone())
+        })
+}
+
+fn handshake_with_source_maps(
+    state: &AppState,
+    handshake: SessionHandshakeInfo,
+    requested: Option<String>,
+) -> HandshakeInfo {
+    let module_uuid = selected_module_uuid(state, requested, &handshake);
+    let manual_path = state
+        .manual_source_map_path
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let source_map_status = match manual_path {
+        Some(path) => configure_source_maps_from_path(state, &path),
+        None => configure_source_maps_for_module(state, module_uuid.as_deref()),
+    };
+    let mut info = HandshakeInfo::from(handshake);
+    info.source_map_status = source_map_status;
+    info
 }
 
 pub async fn listen_to_minecraft(
@@ -479,13 +1156,18 @@ pub async fn listen_to_minecraft(
     passcode: Option<String>,
 ) -> Result<HandshakeInfo, String> {
     state.ensure_bridge(&app).await;
+    *state
+        .selected_module_uuid
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = target_module_uuid.clone();
+    let requested = target_module_uuid.clone();
     let hs = map_err(
         state
             .controller
             .listen(port, target_module_uuid, passcode)
             .await,
     )?;
-    Ok(HandshakeInfo::from(hs))
+    Ok(handshake_with_source_maps(state, hs, requested))
 }
 
 pub async fn connect_to_minecraft(
@@ -497,13 +1179,18 @@ pub async fn connect_to_minecraft(
     passcode: Option<String>,
 ) -> Result<HandshakeInfo, String> {
     state.ensure_bridge(&app).await;
+    *state
+        .selected_module_uuid
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = target_module_uuid.clone();
+    let requested = target_module_uuid.clone();
     let hs = map_err(
         state
             .controller
             .connect(host, port, target_module_uuid, passcode)
             .await,
     )?;
-    Ok(HandshakeInfo::from(hs))
+    Ok(handshake_with_source_maps(state, hs, requested))
 }
 
 pub async fn disconnect(state: &AppState) -> Result<(), String> {
@@ -515,7 +1202,18 @@ pub async fn cancel_pending_connect(state: &AppState) -> Result<(), String> {
 }
 
 pub async fn select_target_module(state: &AppState, module_uuid: String) -> Result<(), String> {
-    map_err(state.controller.select_target(module_uuid).await)
+    *state
+        .selected_module_uuid
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(module_uuid.clone());
+    let result = map_err(state.controller.select_target(module_uuid).await);
+    if result.is_err() {
+        *state
+            .selected_module_uuid
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+    result
 }
 
 pub async fn send_minecraft_command(state: &AppState, command: String) -> Result<(), String> {
@@ -529,7 +1227,7 @@ pub async fn send_minecraft_command(state: &AppState, command: String) -> Result
 
 pub async fn get_handshake_info(state: &AppState) -> Result<Option<HandshakeInfo>, String> {
     let hs = map_err(state.controller.get_handshake_info().await)?;
-    Ok(hs.map(HandshakeInfo::from))
+    Ok(hs.map(|handshake| handshake_with_source_maps(state, handshake, None)))
 }
 
 pub async fn pause_thread(state: &AppState, thread_id: u32) -> Result<(), String> {
@@ -626,6 +1324,85 @@ mod tests {
             )
             .expect("write source map");
         }
+
+        fn write_mojang_pack(&self, module_uuid: &str, map_file_name: &str) -> PathBuf {
+            let pack_root = self
+                .root
+                .join("development_behavior_packs")
+                .join("Shield BP");
+            let scripts = pack_root.join("scripts");
+            fs::create_dir_all(&scripts).expect("create Mojang pack scripts");
+            fs::write(
+                pack_root.join("manifest.json"),
+                format!(
+                    r#"{{
+                        "format_version": 2,
+                        "modules": [{{
+                            "type": "script",
+                            "uuid": "{module_uuid}",
+                            "entry": "scripts/main.js"
+                        }}]
+                    }}"#
+                ),
+            )
+            .expect("write pack manifest");
+            fs::write(
+                scripts.join(map_file_name),
+                r#"{
+                    "version": 3,
+                    "file": "main.js",
+                    "sources": ["../../src/main.ts"],
+                    "names": [],
+                    "mappings": "AAAA"
+                }"#,
+            )
+            .expect("write pack source map");
+            pack_root
+        }
+
+        fn write_regolith_project(&self, module_uuid: &str) -> PathBuf {
+            let project_root = self.root.join("projects").join("shield");
+            let behavior_pack = project_root.join("packs").join("BP");
+            let resource_pack = project_root.join("packs").join("RP");
+            fs::create_dir_all(&behavior_pack).expect("create Regolith behavior pack");
+            fs::create_dir_all(&resource_pack).expect("create Regolith resource pack");
+            fs::write(
+                project_root.join("config.json"),
+                r#"{
+                    "packs": {
+                        "behaviorPack": "./packs/BP",
+                        "resourcePack": "./packs/RP"
+                    },
+                    "regolith": { "dataPath": "./data" }
+                }"#,
+            )
+            .expect("write Regolith config");
+            fs::write(
+                behavior_pack.join("manifest.json"),
+                format!(
+                    r#"{{
+                        "format_version": 2,
+                        "header": {{ "uuid": "bp-header-uuid" }},
+                        "modules": [{{
+                            "type": "script",
+                            "uuid": "{module_uuid}",
+                            "entry": "scripts/main.js"
+                        }}]
+                    }}"#
+                ),
+            )
+            .expect("write Regolith manifest");
+            fs::write(
+                resource_pack.join("manifest.json"),
+                r#"{
+                    "format_version": 2,
+                    "header": { "uuid": "rp-header-uuid" },
+                    "modules": []
+                }"#,
+            )
+            .expect("write resource manifest");
+            project_root
+        }
     }
 
     impl Drop for TestWorkspace {
@@ -649,6 +1426,11 @@ mod tests {
                 },
             ],
             require_passcode: true,
+            source_map_status: WorkspaceMapStatus {
+                enabled: true,
+                map_path: Some("C:/pack/scripts/main.js.map".into()),
+                error: None,
+            },
         };
 
         let json = serde_json::to_value(&info).unwrap();
@@ -661,6 +1443,7 @@ mod tests {
         );
         assert!(map.contains_key("version"), "should have version");
         assert!(map.contains_key("plugins"), "should have plugins");
+        assert!(map.contains_key("sourceMapStatus"));
 
         // No snake_case top-level keys
         assert!(
@@ -853,13 +1636,7 @@ mod tests {
         assert_eq!(frames.len(), 1);
         let frame = &frames[0];
         assert_eq!((frame.generated_line, frame.generated_column), (1, None));
-        let expected_source = workspace
-            .root
-            .join("src")
-            .join("main.ts")
-            .to_string_lossy()
-            .into_owned();
-        assert_eq!(frame.source_path.as_deref(), Some(expected_source.as_str()));
+        assert_eq!(frame.source_path.as_deref(), Some("../../src/main.ts"));
         assert_eq!((frame.source_line, frame.source_column), (Some(1), Some(1)));
         assert!(frame.mapped);
     }
@@ -917,72 +1694,125 @@ mod tests {
     }
 
     #[test]
-    fn workspace_status_controls_cache_for_disabled_and_load_outcomes() {
+    fn finds_connected_modules_main_js_map_under_mojang_dir() {
+        let workspace = TestWorkspace::new();
+        let module_uuid = "e05152e8-56fc-4e10-9f27-dc7796400bd7";
+        let pack_root = workspace.write_mojang_pack(module_uuid, "main.js.map");
+
+        let (found_pack, map_path) =
+            find_source_map_for_module(&workspace.root, module_uuid).expect("find source map");
+        assert_eq!(found_pack, pack_root);
+        assert_eq!(map_path, pack_root.join("scripts").join("main.js.map"));
+
+        let maps = mc_source_maps::SourceMaps::from_map_file(map_path, found_pack)
+            .expect("load discovered source map");
+        assert!(maps.generated_to_original("/scripts/main.js", 0, 0).is_ok());
+        assert!(find_source_map_for_module(&workspace.root, "unknown-module").is_err());
+    }
+
+    #[test]
+    fn accepts_map_js_filename_fallback() {
+        let workspace = TestWorkspace::new();
+        let module_uuid = "module-with-map-js";
+        let pack_root = workspace.write_mojang_pack(module_uuid, "main.map.js");
+
+        let (_, map_path) =
+            find_source_map_for_module(&workspace.root, module_uuid).expect("find .map.js");
+        assert_eq!(map_path, pack_root.join("scripts").join("main.map.js"));
+        let maps = mc_source_maps::SourceMaps::from_map_file(&map_path, &pack_root)
+            .expect("load .map.js source map");
+        assert!(maps.generated_to_original("/scripts/main.js", 0, 0).is_ok());
+    }
+
+    #[test]
+    fn opens_regolith_workspace_and_reports_pack_metadata() {
+        let workspace = TestWorkspace::new();
+        let module_uuid = "e05152e8-56fc-4e10-9f27-dc7796400bd7";
+        let project_root = workspace.write_regolith_project(module_uuid);
         let state = AppState::new();
 
-        let disabled = set_workspace_root(&state, Some("   ".into()));
+        let selection =
+            set_workspace_root(&state, Some(project_root.to_string_lossy().into_owned()))
+                .expect("open workspace");
+        let info = selection.workspace.expect("workspace info");
+        assert_eq!(info.behavior_pack_uuid.as_deref(), Some("bp-header-uuid"));
+        assert_eq!(info.resource_pack_uuid.as_deref(), Some("rp-header-uuid"));
+        assert_eq!(info.script_module_uuids, [module_uuid]);
         assert_eq!(
-            disabled,
-            WorkspaceMapStatus {
-                enabled: false,
-                map_path: None,
-                error: None,
-            }
+            source_base_for_module(&state, module_uuid),
+            Some(fs::canonicalize(&project_root).unwrap())
         );
-        assert!(state.source_maps.read().unwrap().is_none());
+        assert!(source_base_for_module(&state, "different-module").is_none());
+        let mismatch = configure_source_maps_for_module(&state, Some("different-module"));
+        assert!(!mismatch.enabled);
+        assert!(mismatch
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("does not contain connected script module")));
 
+        assert!(set_workspace_root(&state, None)
+            .expect("clear workspace")
+            .workspace
+            .is_none());
+    }
+
+    #[test]
+    fn manual_source_map_override_loads_and_clears() {
         let workspace = TestWorkspace::new();
-        let expected_map_path = workspace
-            .root
-            .join("BP")
-            .join("scripts")
-            .join("main.js.map")
-            .to_string_lossy()
-            .into_owned();
-        let missing =
-            set_workspace_root(&state, Some(workspace.root.to_string_lossy().into_owned()));
-        assert!(!missing.enabled);
-        assert_eq!(
-            missing.map_path.as_deref(),
-            Some(expected_map_path.as_str())
-        );
-        assert!(missing.error.is_some());
-        assert!(state.source_maps.read().unwrap().is_none());
+        let pack_root = workspace.write_mojang_pack("manual-module", "main.js.map");
+        let map_path = pack_root.join("scripts").join("main.js.map");
+        let state = AppState::new();
 
-        fs::write(workspace.map_path(), "{malformed").expect("write malformed map");
-        let malformed =
-            set_workspace_root(&state, Some(workspace.root.to_string_lossy().into_owned()));
-        assert!(!malformed.enabled);
+        let loaded = set_source_map_path(&state, Some(map_path.to_string_lossy().into_owned()));
+        assert!(loaded.enabled);
         assert_eq!(
-            malformed.map_path.as_deref(),
-            Some(expected_map_path.as_str())
+            loaded.map_path.as_deref(),
+            Some(map_path.to_string_lossy().as_ref())
         );
-        assert!(malformed.error.is_some());
-        assert!(state.source_maps.read().unwrap().is_none());
+        assert!(state.source_maps.read().unwrap().is_some());
 
-        workspace.write_valid_map();
-        let valid = set_workspace_root(&state, Some(workspace.root.to_string_lossy().into_owned()));
-        assert_eq!(
-            valid,
-            WorkspaceMapStatus {
-                enabled: true,
-                map_path: Some(expected_map_path),
-                error: None,
-            }
-        );
-        let maps = state.source_maps.read().unwrap();
-        assert!(maps
-            .as_ref()
-            .expect("cached source map")
-            .generated_to_original("/scripts/main.js", 0, 0)
-            .is_ok());
-        drop(maps);
-
-        let cleared = set_workspace_root(&state, None);
+        let cleared = set_source_map_path(&state, None);
         assert!(!cleared.enabled);
-        assert_eq!(cleared.map_path, None);
         assert_eq!(cleared.error, None);
         assert!(state.source_maps.read().unwrap().is_none());
+    }
+
+    #[test]
+    fn manual_folder_uses_manifest_script_entry_instead_of_main_filename() {
+        let workspace = TestWorkspace::new();
+        let pack_root = workspace.root.join("custom-entry-pack");
+        let generated = pack_root.join("dist").join("runtime.js");
+        fs::create_dir_all(generated.parent().unwrap()).expect("create custom entry directory");
+        fs::write(
+            pack_root.join("manifest.json"),
+            r#"{
+                "format_version": 2,
+                "modules": [{
+                    "type": "script",
+                    "uuid": "custom-entry-module",
+                    "entry": "dist/runtime.js"
+                }]
+            }"#,
+        )
+        .expect("write custom manifest");
+        let map_path = PathBuf::from(format!("{}.map", generated.to_string_lossy()));
+        fs::write(
+            &map_path,
+            r#"{
+                "version": 3,
+                "file": "runtime.js",
+                "sources": ["../src/runtime.ts"],
+                "names": [],
+                "mappings": "AAAA"
+            }"#,
+        )
+        .expect("write custom source map");
+
+        let (found_map, generated_root) =
+            resolve_manual_map_path(&pack_root, Some("custom-entry-module"))
+                .expect("resolve manifest entry map");
+        assert_eq!(found_map, map_path);
+        assert_eq!(generated_root, pack_root);
     }
 
     #[test]

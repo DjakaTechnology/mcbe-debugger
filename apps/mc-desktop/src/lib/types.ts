@@ -1,8 +1,10 @@
 export type PluginInfo = { name: string; module_uuid: string };
+export type LogLevel = 0 | 1 | 2 | 3 | 4;
 export type HandshakeInfo = {
   version: number;
   plugins: PluginInfo[];
   requirePasscode: boolean;
+  sourceMapStatus: SourceMapDetectionResult;
 };
 export type StatDataModel = {
   name: string;
@@ -32,8 +34,8 @@ export type McEvent =
   | { kind: "protocol"; version: number; plugins: PluginInfo[]; requirePasscode: boolean }
   | { kind: "stopped"; reason: string; thread: number }
   | { kind: "thread"; reason: string; thread: number }
-  | { kind: "print"; message: string; logLevel: number; frames?: SourceFrame[] }
-  | { kind: "notification"; message: string; logLevel: number; frames?: SourceFrame[] }
+  | { kind: "print"; message: string; logLevel: LogLevel; frames?: SourceFrame[] }
+  | { kind: "notification"; message: string; logLevel: LogLevel; frames?: SourceFrame[] }
   | { kind: "stat2"; tick: number; stats: StatDataModel[] }
   | { kind: "profilerCapture"; captureBasePath: string }
   | { kind: "schema"; count: number }
@@ -41,18 +43,30 @@ export type McEvent =
   | { kind: "unknown"; typeName: string };
 
 /**
- * Result of the `set_workspace_root` Tauri command.
- * `enabled` is false when no workspace root is configured; `mapPath` is the
- * resolved absolute path to the loaded map when mapping is active.
+ * Result of automatic source-map detection for the connected script module.
  */
-export type SetWorkspaceRootResult = {
+export type SourceMapDetectionResult = {
   enabled: boolean;
   mapPath: string | null;
   error: string | null;
 };
 
+export type WorkspaceInfo = {
+  root: string;
+  behaviorPackPath: string;
+  resourcePackPath: string | null;
+  behaviorPackUuid: string | null;
+  resourcePackUuid: string | null;
+  scriptModuleUuids: string[];
+};
+
+export type WorkspaceSelection = {
+  workspace: WorkspaceInfo | null;
+  sourceMapStatus: SourceMapDetectionResult;
+};
+
 /**
- * Frontend view of source-map status, derived from {@link SetWorkspaceRootResult}.
+ * Frontend view of source-map status, derived from {@link SourceMapDetectionResult}.
  * A missing map is surfaced as `unavailable`, never as the page error.
  */
 export type SourceMapStatus =

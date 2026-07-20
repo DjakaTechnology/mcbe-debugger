@@ -16,7 +16,7 @@
   import HelpCircle from "@lucide/svelte/icons/help-circle";
   import MapPin from "@lucide/svelte/icons/map-pin";
   import FileCode from "@lucide/svelte/icons/file-code";
-  import type { McEvent, SourceFrame } from "$lib/types.js";
+  import type { LogLevel, McEvent, SourceFrame } from "$lib/types.js";
   import {
     formatEvent,
     eventIcon,
@@ -36,6 +36,7 @@
     logLevel,
     onSearchChange,
     onKindToggle,
+    onClearEventKinds,
     onLogLevelChange,
     onClearLog,
     onResetFilters,
@@ -44,10 +45,11 @@
     filteredEvents: McEvent[];
     searchQuery: string;
     kindFilters: Record<McEvent["kind"], boolean>;
-    logLevel: "all" | 0 | 1 | 2;
+    logLevel: "all" | LogLevel;
     onSearchChange: (q: string) => void;
     onKindToggle: (kind: McEvent["kind"]) => void;
-    onLogLevelChange: (level: "all" | 0 | 1 | 2) => void;
+    onClearEventKinds: () => void;
+    onLogLevelChange: (level: "all" | LogLevel) => void;
     onClearLog: () => void;
     onResetFilters: () => void;
   } = $props();
@@ -90,7 +92,8 @@
   let activeFilterCount = $derived.by(() => {
     let count = 0;
     if (searchQuery.trim()) count++;
-    if (Object.values(kindFilters).some((v) => !v)) count++;
+    const kindValues = Object.values(kindFilters);
+    if (kindValues.some(Boolean) && kindValues.some((value) => !value)) count++;
     if (logLevel !== "all") count++;
     return count;
   });
@@ -110,10 +113,14 @@
 
   const logLevels = [
     { label: "All", value: "all" },
-    { label: "LOG", value: 0 },
-    { label: "WARN", value: 1 },
-    { label: "ERROR", value: 2 },
+    { label: "Verbose", value: 0 },
+    { label: "Log", value: 1 },
+    { label: "Warn", value: 2 },
+    { label: "Error", value: 3 },
+    { label: "Stop", value: 4 },
   ] as const;
+
+  const eventLogKinds = kindOrder.filter((kind) => kind !== "stat2");
 </script>
 
 <div class="flex min-h-0 flex-1 flex-col p-4">
@@ -169,7 +176,7 @@
                       <button
                         type="button"
                         onclick={() => onLogLevelChange(level.value as typeof logLevel)}
-                        class="px-2.5 py-1 text-[10px] font-semibold uppercase transition-colors {logLevel === level.value
+                        class="flex-1 px-1 py-1 text-[9px] font-semibold uppercase transition-colors {logLevel === level.value
                           ? 'rounded-md bg-white text-indigo-600 shadow-sm dark:bg-zinc-700 dark:text-indigo-400'
                           : 'text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-300'}"
                       >
@@ -180,9 +187,21 @@
                 </div>
 
                 <div class="space-y-1.5">
-                  <span class="block text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Event kinds</span>
+                  <div class="flex items-center justify-between">
+                    <span class="text-[10px] font-medium uppercase tracking-wide text-zinc-500 dark:text-zinc-400">Event kinds</span>
+                    <button
+                      type="button"
+                      onclick={onClearEventKinds}
+                      disabled={!Object.values(kindFilters).some(Boolean)}
+                      aria-label="Clear event kinds"
+                      title="No selected kinds shows all events"
+                      class="text-[10px] font-medium text-indigo-600 transition-colors hover:text-indigo-700 disabled:cursor-not-allowed disabled:text-zinc-300 dark:text-indigo-400 dark:hover:text-indigo-300 dark:disabled:text-zinc-700"
+                    >
+                      Clear all
+                    </button>
+                  </div>
                   <div class="flex flex-wrap gap-1.5">
-                    {#each kindOrder as kind}
+                    {#each eventLogKinds as kind}
                       {@const Icon = iconComponents[eventIcon(kind)]}
                       <button
                         type="button"

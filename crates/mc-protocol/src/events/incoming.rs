@@ -1,8 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::events::shared::{
-    DiagnosticsTabDescriptor, LogLevel, PluginDetails, StatDataModel,
-};
+use crate::events::shared::{DiagnosticsTabDescriptor, LogLevel, PluginDetails, StatDataModel};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -15,15 +13,9 @@ pub enum DebuggeeEvent {
         require_passcode: bool,
     },
     #[serde(rename = "StoppedEvent")]
-    Stopped {
-        reason: String,
-        thread: u32,
-    },
+    Stopped { reason: String, thread: u32 },
     #[serde(rename = "ThreadEvent")]
-    Thread {
-        reason: String,
-        thread: u32,
-    },
+    Thread { reason: String, thread: u32 },
     #[serde(rename = "PrintEvent")]
     Print {
         message: String,
@@ -145,7 +137,7 @@ mod tests {
         };
         let json = serde_json::to_value(&event).unwrap();
         assert_eq!(json["type"], "PrintEvent");
-        assert_eq!(json["logLevel"], 1);
+        assert_eq!(json["logLevel"], 2);
         let decoded: DebuggeeEvent = serde_json::from_value(json).unwrap();
         match decoded {
             DebuggeeEvent::Print { message, log_level } => {

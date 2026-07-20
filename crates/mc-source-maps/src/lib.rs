@@ -2,7 +2,7 @@
 //!
 //! All line and column values accepted or returned by this crate are zero-based.
 
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::BufReader;
 use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
 
@@ -21,10 +21,12 @@ pub enum SourceMapError {
 /// An owned location in an original source file.
 ///
 /// `line` and `column` are zero-based. `path` is an absolute, lexically
-/// normalized filesystem path; the source file does not need to exist.
+/// normalized filesystem path. Existing files and links are canonicalized.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OriginalLocation {
     pub path: PathBuf,
+    /// Original source reference stored in the map, before filesystem rebasing.
+    pub source_reference: String,
     pub line: u32,
     pub column: u32,
     pub name: Option<String>,
@@ -47,6 +49,7 @@ struct Mapping {
     generated_line: u32,
     generated_column: u32,
     original_path: PathBuf,
+    source_reference: String,
     original_line: u32,
     original_column: u32,
     name: Option<String>,
@@ -93,8 +96,32 @@ impl SourceMaps {
         map_path: impl AsRef<Path>,
         generated_root: impl AsRef<Path>,
     ) -> Result<Self, SourceMapError> {
-        let map_path = absolute_normalized(map_path.as_ref())?;
-        let generated_root = absolute_normalized(generated_root.as_ref())?;
+        Self::from_map_file_inner(map_path.as_ref(), generated_root.as_ref(), None)
+    }
+
+    /// Loads one source map while rebasing relative original sources onto a
+    /// known project root. This is useful for copied Regolith development packs
+    /// whose source map still contains paths such as `../../data/scripts/...`.
+    pub fn from_map_file_with_source_base(
+        map_path: impl AsRef<Path>,
+        generated_root: impl AsRef<Path>,
+        source_base: impl AsRef<Path>,
+    ) -> Result<Self, SourceMapError> {
+        let source_base = absolute_normalized(source_base.as_ref())?;
+        Self::from_map_file_inner(
+            map_path.as_ref(),
+            generated_root.as_ref(),
+            Some(source_base),
+        )
+    }
+
+    fn from_map_file_inner(
+        map_path: &Path,
+        generated_root: &Path,
+        source_base: Option<PathBuf>,
+    ) -> Result<Self, SourceMapError> {
+        let map_path = absolute_normalized(map_path)?;
+        let generated_root = absolute_normalized(generated_root)?;
         let generated_relative = map_path.strip_prefix(&generated_root).map_err(|_| {
             SourceMapError::Invalid(format!(
                 "map '{}' is not beneath generated root '{}'",
@@ -111,7 +138,21 @@ impl SourceMaps {
             )));
         }
 
-        let file = File::open(&map_path).map_err(|error| {
+        // Keep the logical path for the generated `/scripts/...` identity, but
+        // resolve links before interpreting original source paths. Regolith's
+        // development packs commonly link into `<project>/.regolith/tmp`.
+        let canonical_map_path = canonicalize_existing(&map_path);
+        let physical_map_path = if path_contains_link(&map_path)
+            || canonical_map_path
+                .parent()
+                .and_then(regolith_project_root)
+                .is_some()
+        {
+            canonical_map_path
+        } else {
+            map_path.clone()
+        };
+        let file = File::open(&physical_map_path).map_err(|error| {
             if error.kind() == std::io::ErrorKind::NotFound {
                 SourceMapError::NotFound(format!("'{}'", map_path.display()))
             } else {
@@ -134,7 +175,7 @@ impl SourceMaps {
             }
         };
 
-        let map_directory = map_path.parent().ok_or_else(|| {
+        let map_directory = physical_map_path.parent().ok_or_else(|| {
             SourceMapError::Invalid(format!(
                 "map '{}' has no parent directory",
                 map_path.display()
@@ -147,7 +188,12 @@ impl SourceMaps {
                 Some(Mapping {
                     generated_line: token.get_dst_line(),
                     generated_column: token.get_dst_col(),
-                    original_path: resolve_source_path(map_directory, source),
+                    original_path: resolve_source_path_with_base(
+                        map_directory,
+                        source,
+                        source_base.as_deref(),
+                    ),
+                    source_reference: source.to_owned(),
                     original_line: token.get_src_line(),
                     original_column: token.get_src_col(),
                     name: token.get_name().map(str::to_owned),
@@ -201,6 +247,7 @@ impl SourceMaps {
 
         Ok(OriginalLocation {
             path: mapping.original_path.clone(),
+            source_reference: mapping.source_reference.clone(),
             line: mapping.original_line,
             column: mapping.original_column,
             name: mapping.name.clone(),
@@ -275,9 +322,16 @@ fn remove_map_suffix(path: &Path) -> Result<PathBuf, SourceMapError> {
         .file_name()
         .and_then(|name| name.to_str())
         .ok_or_else(|| SourceMapError::Invalid(format!("invalid map path '{}'", path.display())))?;
-    let generated_name = file_name.strip_suffix(".map").ok_or_else(|| {
-        SourceMapError::Invalid(format!("map path '{}' must end in .map", path.display()))
-    })?;
+    let generated_name = if let Some(name) = file_name.strip_suffix(".map") {
+        name.to_owned()
+    } else if let Some(stem) = file_name.strip_suffix(".map.js") {
+        format!("{stem}.js")
+    } else {
+        return Err(SourceMapError::Invalid(format!(
+            "map path '{}' must end in .js.map or .map.js",
+            path.display()
+        )));
+    };
     let mut generated = path.to_path_buf();
     generated.set_file_name(generated_name);
     Ok(generated)
@@ -297,13 +351,88 @@ fn normalize_generated_path(path: &str) -> String {
     parts.join("/")
 }
 
+#[cfg(test)]
 fn resolve_source_path(map_directory: &Path, source: &str) -> PathBuf {
+    resolve_source_path_with_base(map_directory, source, None)
+}
+
+fn resolve_source_path_with_base(
+    map_directory: &Path,
+    source: &str,
+    source_base: Option<&Path>,
+) -> PathBuf {
     let source = native_path(source);
     if source.is_absolute() {
-        lexical_normalize(&source)
-    } else {
-        lexical_normalize(&map_directory.join(source))
+        return canonicalize_existing(&source);
     }
+
+    if let Some(source_base) = source_base {
+        let project_relative = without_leading_parent_components(&source);
+        if !project_relative.as_os_str().is_empty() {
+            return canonicalize_existing(&source_base.join(project_relative));
+        }
+    }
+
+    if let Some(project_root) = regolith_project_root(map_directory) {
+        let project_relative = without_leading_parent_components(&source);
+        if !project_relative.as_os_str().is_empty() {
+            let project_source = lexical_normalize(&project_root.join(project_relative));
+            if project_source.exists() {
+                return canonicalize_existing(&project_source);
+            }
+        }
+    }
+
+    canonicalize_existing(&lexical_normalize(&map_directory.join(source)))
+}
+
+fn without_leading_parent_components(path: &Path) -> PathBuf {
+    path.components()
+        .skip_while(|component| matches!(component, Component::CurDir | Component::ParentDir))
+        .collect()
+}
+
+fn regolith_project_root(path: &Path) -> Option<&Path> {
+    path.ancestors().find_map(|ancestor| {
+        (ancestor.file_name().and_then(|name| name.to_str()) == Some(".regolith"))
+            .then(|| ancestor.parent())
+            .flatten()
+    })
+}
+
+fn path_contains_link(path: &Path) -> bool {
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        if fs::symlink_metadata(&current)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn canonicalize_existing(path: &Path) -> PathBuf {
+    let canonical = fs::canonicalize(path).unwrap_or_else(|_| lexical_normalize(path));
+    clean_windows_verbatim_path(canonical)
+}
+
+#[cfg(windows)]
+fn clean_windows_verbatim_path(path: PathBuf) -> PathBuf {
+    let path = path.to_string_lossy();
+    if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    path.strip_prefix(r"\\?\")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(path.as_ref()))
+}
+
+#[cfg(not(windows))]
+fn clean_windows_verbatim_path(path: PathBuf) -> PathBuf {
+    path
 }
 
 fn native_path(path: &str) -> PathBuf {
@@ -422,6 +551,7 @@ mod tests {
             .generated_to_original("/scripts/main.js", 0, 2)
             .expect("resolve generated location");
         assert_eq!(original.path, workspace.root.join("src").join("main.ts"));
+        assert_eq!(original.source_reference, "../../src/main.ts");
         assert_eq!((original.line, original.column), (0, 4));
         assert_eq!(original.name.as_deref(), Some("first"));
 
@@ -500,6 +630,68 @@ mod tests {
             maps.original_to_generated(source, 2, 0),
             Err(SourceMapError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn resolves_regolith_temp_sources_back_to_project_root() {
+        let workspace = TestWorkspace::new();
+        let map_directory = workspace
+            .root
+            .join(".regolith")
+            .join("tmp")
+            .join("packs")
+            .join("BP")
+            .join("scripts");
+        fs::create_dir_all(&map_directory).expect("create Regolith map directory");
+        let project_source = workspace
+            .root
+            .join("data")
+            .join("scripts")
+            .join("core")
+            .join("shield.ts");
+        fs::create_dir_all(project_source.parent().expect("source parent"))
+            .expect("create project source directory");
+        fs::write(&project_source, "export {};\n").expect("write project source");
+
+        let resolved = resolve_source_path(&map_directory, "../../data/scripts/core/shield.ts");
+        assert_eq!(resolved, canonicalize_existing(&project_source));
+    }
+
+    #[test]
+    fn rebases_sources_from_a_copied_regolith_pack() {
+        let workspace = TestWorkspace::new();
+        let pack_root = workspace.root.join("installed").join("Shield Add-on_bp");
+        let scripts = pack_root.join("scripts");
+        fs::create_dir_all(&scripts).expect("create installed scripts");
+        let map_path = scripts.join("main.js.map");
+        fs::write(
+            &map_path,
+            r#"{
+                "version": 3,
+                "file": "main.js",
+                "sources": ["../../data/scripts/core/shield.ts"],
+                "names": [],
+                "mappings": "AAAA"
+            }"#,
+        )
+        .expect("write copied source map");
+
+        let project_root = workspace.root.join("project").join("shield");
+        let project_source = project_root
+            .join("data")
+            .join("scripts")
+            .join("core")
+            .join("shield.ts");
+        fs::create_dir_all(project_source.parent().expect("source parent"))
+            .expect("create source directory");
+        fs::write(&project_source, "export {};\n").expect("write source");
+
+        let maps = SourceMaps::from_map_file_with_source_base(&map_path, &pack_root, &project_root)
+            .expect("load copied Regolith map");
+        let original = maps
+            .generated_to_original("/scripts/main.js", 0, 0)
+            .expect("resolve project source");
+        assert_eq!(original.path, canonicalize_existing(&project_source));
     }
 
     #[test]

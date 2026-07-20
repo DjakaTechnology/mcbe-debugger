@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { onMount } from "svelte";
 
   import Wifi from "@lucide/svelte/icons/wifi";
@@ -16,8 +17,11 @@
     ResponsePayload,
     StatSeries,
     PluginInfo,
-    SetWorkspaceRootResult,
+    SourceMapDetectionResult,
     SourceMapStatus,
+    LogLevel,
+    WorkspaceInfo,
+    WorkspaceSelection,
   } from "$lib/types.js";
   import { accumulateStats, buildChartGroups, buildCategorizedGroups, buildClientIds, buildSubscriberAddonIds, kindOrder } from "$lib/stats.js";
   import { eventSearchText } from "$lib/events.js";
@@ -27,6 +31,7 @@
     saveLastTargetModuleUuid,
     saveKnownPlugins,
     saveFilterState,
+    saveSourceMapPath,
     saveWorkspaceRoot,
   } from "$lib/config.js";
 
@@ -58,22 +63,26 @@
 
   let searchQuery = $state("");
   let kindFilters = $state<Record<McEvent["kind"], boolean>>({
-    protocol: true,
-    stopped: true,
-    thread: true,
-    print: true,
-    notification: true,
-    stat2: true,
-    profilerCapture: true,
-    schema: true,
-    terminated: true,
-    unknown: true,
+    protocol: false,
+    stopped: false,
+    thread: false,
+    print: false,
+    notification: false,
+    stat2: false,
+    profilerCapture: false,
+    schema: false,
+    terminated: false,
+    unknown: false,
   });
-  let logLevel = $state<"all" | 0 | 1 | 2>("all");
+  let logLevel = $state<"all" | LogLevel>("all");
 
-  // ── Source-map workspace state ────────────────────────────────────────
-  let workspaceRoot = $state("");
+  // ── Automatic source-map detection state ─────────────────────────────
+  let sourceMapPath = $state("");
   let sourceMapStatus = $state<SourceMapStatus>({ state: "disabled" });
+  let workspaceRoot = $state("");
+  let workspaceInfo = $state<WorkspaceInfo | null>(null);
+  let workspaceError = $state<string | null>(null);
+  let workspaceLoading = $state(false);
 
   // ── Config / auto-relisten state ──────────────────────────────────────
   let configLoaded = $state(false);
@@ -102,8 +111,9 @@
 
   let filteredEvents = $derived.by(() => {
     const query = searchQuery.trim().toLowerCase();
+    const hasSelectedKind = Object.values(kindFilters).some(Boolean);
     return events.filter((event) => {
-      if (!kindFilters[event.kind]) return false;
+      if (hasSelectedKind && !kindFilters[event.kind]) return false;
       if (logLevel !== "all" && (event.kind === "print" || event.kind === "notification")) {
         if (event.logLevel !== logLevel) return false;
       }
@@ -172,6 +182,7 @@
         }
       }
       logLevel = cfg.logLevel;
+      sourceMapPath = cfg.sourceMapPath;
       workspaceRoot = cfg.workspaceRoot;
       configLoaded = true;
     }).catch((err) => {
@@ -184,9 +195,10 @@
     // 2) Set up event listeners
     const setupListeners = Promise.all([
       listen<McEvent>("mc-event", (e) => {
-        events = [...events, e.payload].slice(-500);
         if (e.payload.kind === "stat2") {
           statsCollection = accumulateStats(statsCollection, e.payload.stats, e.payload.tick);
+        } else {
+          events = [...events, e.payload];
         }
         if (e.payload.kind === "stopped") {
           stopped = true;
@@ -277,6 +289,7 @@
 
       // Persist config after successful handshake
       if (handshake) {
+        sourceMapStatus = parseSourceMapStatus(handshake.sourceMapStatus);
         updateConfigAfterHandshake(handshake, passcode, targetModuleUuid);
       }
     } catch (e) {
@@ -395,19 +408,23 @@
     kindFilters[kind] = !kindFilters[kind];
   }
 
+  function handleClearEventKinds() {
+    kindFilters = Object.fromEntries(kindOrder.map((kind) => [kind, false])) as Record<McEvent["kind"], boolean>;
+  }
+
   function handleResetFilters() {
     searchQuery = "";
     kindFilters = {
-      protocol: true,
-      stopped: true,
-      thread: true,
-      print: true,
-      notification: true,
-      stat2: true,
-      profilerCapture: true,
-      schema: true,
-      terminated: true,
-      unknown: true,
+      protocol: false,
+      stopped: false,
+      thread: false,
+      print: false,
+      notification: false,
+      stat2: false,
+      profilerCapture: false,
+      schema: false,
+      terminated: false,
+      unknown: false,
     };
     logLevel = "all";
   }
@@ -457,57 +474,79 @@
     };
   });
 
-  // ── Source-map workspace root: persist + sync to backend ──────────────
-  // Debounced so rapid edits (and filesystem path typing) don't trigger a
-  // backend reload on every keystroke. A monotonic request id guards against
-  // stale async responses overwriting a newer edit.
-  let _workspaceTimer: ReturnType<typeof setTimeout> | null = null;
-  let _workspaceReqId = 0;
-
   /**
-   * Map a successful `set_workspace_root` response to frontend status.
-   * A backend-reported status error (missing/malformed map) is `unavailable`
-   * with its message — NOT `error`, which is reserved for an actual Tauri
-   * invoke exception surfaced in the catch below. A missing map is never the
-   * page's primary connection error.
+   * Map backend auto-detection to an inline status. Detection failures are
+   * informational and never replace the primary connection status.
    */
-  function parseSourceMapStatus(r: SetWorkspaceRootResult): SourceMapStatus {
+  function parseSourceMapStatus(r: SourceMapDetectionResult): SourceMapStatus {
     if (r.error) return { state: "unavailable", message: r.error };
     if (!r.enabled) return { state: "disabled" };
     if (r.mapPath) return { state: "loaded", mapPath: r.mapPath };
     return { state: "unavailable" };
   }
 
-  async function syncWorkspaceRoot(value: string): Promise<void> {
-    const reqId = ++_workspaceReqId;
-    const trimmed = value.trim();
-    sourceMapStatus = { state: "loading" };
+  let _workspaceTimer: ReturnType<typeof setTimeout> | null = null;
+  let _workspaceRequestId = 0;
+
+  async function syncWorkspaceSettings(root: string, mapPath: string): Promise<void> {
+    const requestId = ++_workspaceRequestId;
+    workspaceLoading = true;
+    workspaceError = null;
+    if (root.trim() || mapPath.trim()) sourceMapStatus = { state: "loading" };
     try {
-      const result = await invoke<SetWorkspaceRootResult>("set_workspace_root", {
-        workspaceRoot: trimmed || null,
+      const selection = await invoke<WorkspaceSelection>("set_workspace_root", {
+        workspaceRoot: root.trim() || null,
       });
-      // Ignore stale responses so an old request can't overwrite a newer edit.
-      if (reqId !== _workspaceReqId) return;
-      sourceMapStatus = parseSourceMapStatus(result);
+      const sourceMapResult = await invoke<SourceMapDetectionResult>("set_source_map_path", {
+        sourceMapPath: mapPath.trim() || null,
+      });
+      if (requestId !== _workspaceRequestId) return;
+      workspaceInfo = selection.workspace;
+      sourceMapStatus = parseSourceMapStatus(sourceMapResult);
     } catch (e) {
-      if (reqId !== _workspaceReqId) return;
-      // Reserved for an actual Tauri invoke exception (command missing,
-      // serialization failure, etc.), not a missing/malformed map.
-      sourceMapStatus = { state: "error", message: String(e) };
+      if (requestId !== _workspaceRequestId) return;
+      workspaceInfo = null;
+      workspaceError = String(e);
+    } finally {
+      if (requestId === _workspaceRequestId) workspaceLoading = false;
     }
+  }
+
+  async function handleOpenWorkspace() {
+    workspaceError = null;
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: "Open Regolith workspace",
+      });
+      if (typeof selected === "string") {
+        workspaceInfo = null;
+        workspaceRoot = selected;
+      }
+    } catch (e) {
+      workspaceError = String(e);
+    }
+  }
+
+  function handleClearWorkspace() {
+    workspaceRoot = "";
+    workspaceInfo = null;
+    workspaceError = null;
   }
 
   $effect(() => {
     workspaceRoot;
+    sourceMapPath;
     configLoaded;
-
     if (!configLoaded) return;
 
     if (_workspaceTimer) clearTimeout(_workspaceTimer);
     _workspaceTimer = setTimeout(() => {
       _workspaceTimer = null;
       saveWorkspaceRoot(workspaceRoot);
-      void syncWorkspaceRoot(workspaceRoot);
+      saveSourceMapPath(sourceMapPath);
+      void syncWorkspaceSettings(workspaceRoot, sourceMapPath);
     }, 600);
 
     return () => {
@@ -542,6 +581,7 @@
 
       // Persist config after successful reconnection
       if (handshake) {
+        sourceMapStatus = parseSourceMapStatus(handshake.sourceMapStatus);
         updateConfigAfterHandshake(handshake, passcode, targetModuleUuid);
       }
     } catch (e) {
@@ -590,6 +630,10 @@
     {commandInput}
     {commandHistory}
     {workspaceRoot}
+    {workspaceInfo}
+    {workspaceError}
+    {workspaceLoading}
+    {sourceMapPath}
     {sourceMapStatus}
     onModeChange={(m) => (mode = m)}
     onHostChange={(h) => (host = h)}
@@ -603,7 +647,9 @@
     onCommandInputChange={(c) => (commandInput = c)}
     onSendCommand={handleSendCommand}
     onCommandHistorySelect={(c) => (commandInput = c)}
-    onWorkspaceRootChange={(w) => (workspaceRoot = w)}
+    onOpenWorkspace={handleOpenWorkspace}
+    onClearWorkspace={handleClearWorkspace}
+    onSourceMapPathChange={(path) => (sourceMapPath = path)}
   />
 
   <main class="flex min-w-0 flex-1 flex-col">
@@ -669,6 +715,7 @@
         {logLevel}
         onSearchChange={(q) => (searchQuery = q)}
         onKindToggle={handleKindToggle}
+        onClearEventKinds={handleClearEventKinds}
         onLogLevelChange={(l) => (logLevel = l)}
         onClearLog={clearLog}
         onResetFilters={handleResetFilters}

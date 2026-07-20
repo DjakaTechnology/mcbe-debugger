@@ -15,8 +15,8 @@
   import Terminal from "@lucide/svelte/icons/terminal";
   import MapPin from "@lucide/svelte/icons/map-pin";
   import MapPinOff from "@lucide/svelte/icons/map-pin-off";
-  import FolderTree from "@lucide/svelte/icons/folder-tree";
-  import type { HandshakeInfo, SourceMapStatus } from "$lib/types.js";
+  import FolderOpen from "@lucide/svelte/icons/folder-open";
+  import type { HandshakeInfo, SourceMapStatus, WorkspaceInfo } from "$lib/types.js";
 
   let {
     mode,
@@ -33,6 +33,10 @@
     commandInput,
     commandHistory,
     workspaceRoot,
+    workspaceInfo,
+    workspaceError,
+    workspaceLoading,
+    sourceMapPath,
     sourceMapStatus,
     onModeChange,
     onHostChange,
@@ -46,7 +50,9 @@
     onCommandInputChange,
     onSendCommand,
     onCommandHistorySelect,
-    onWorkspaceRootChange,
+    onOpenWorkspace,
+    onClearWorkspace,
+    onSourceMapPathChange,
   }: {
     mode: "listen" | "connect";
     host: string;
@@ -62,6 +68,10 @@
     commandInput: string;
     commandHistory: string[];
     workspaceRoot: string;
+    workspaceInfo: WorkspaceInfo | null;
+    workspaceError: string | null;
+    workspaceLoading: boolean;
+    sourceMapPath: string;
     sourceMapStatus: SourceMapStatus;
     onModeChange: (mode: "listen" | "connect") => void;
     onHostChange: (host: string) => void;
@@ -75,7 +85,9 @@
     onCommandInputChange: (cmd: string) => void;
     onSendCommand: () => void;
     onCommandHistorySelect: (cmd: string) => void;
-    onWorkspaceRootChange: (workspaceRoot: string) => void;
+    onOpenWorkspace: () => void;
+    onClearWorkspace: () => void;
+    onSourceMapPathChange: (path: string) => void;
   } = $props();
 
   // Compact inline status for the workspace-root field.
@@ -83,7 +95,7 @@
     switch (sourceMapStatus.state) {
       case "loading":
         return {
-          label: "Resolving map…",
+          label: "Checking source map…",
           dot: "bg-amber-500",
           text: "text-amber-600 dark:text-amber-400",
           icon: LoaderCircle,
@@ -92,7 +104,7 @@
         };
       case "loaded":
         return {
-          label: "Map loaded",
+          label: "Source map found",
           dot: "bg-emerald-500",
           text: "text-emerald-600 dark:text-emerald-400",
           icon: MapPin,
@@ -101,18 +113,18 @@
         };
       case "unavailable":
         return {
-          label: "Map unavailable",
+          label: "Source map not found",
           dot: "bg-zinc-400",
           text: "text-zinc-500 dark:text-zinc-400",
           icon: MapPinOff,
           spin: false,
           // Carries the backend status message when present (missing or
           // malformed map); falls back to a helpful default otherwise.
-          title: sourceMapStatus.message ?? "BP/scripts/main.js.map not found or invalid",
+          title: sourceMapStatus.message ?? "No matching source map found under MOJANG_DIR",
         };
       case "error":
         return {
-          label: "Map error",
+          label: "Source map check failed",
           dot: "bg-rose-500",
           text: "text-rose-600 dark:text-rose-400",
           icon: AlertCircle,
@@ -122,12 +134,12 @@
       case "disabled":
       default:
         return {
-          label: "Disabled",
+          label: "Connect to detect source map",
           dot: "bg-zinc-400",
           text: "text-zinc-500 dark:text-zinc-400",
           icon: MapPinOff,
           spin: false,
-          title: "No workspace root set",
+          title: "Source maps are detected after connecting to a script module",
         };
     }
   });
@@ -248,28 +260,87 @@
             />
           </label>
 
-          <label class="block">
+          <div class="rounded-md border border-zinc-200 bg-white/60 p-2.5 dark:border-zinc-800 dark:bg-zinc-950/50">
             <span class="flex items-center gap-1.5">
-              <FolderTree class="h-3 w-3 text-zinc-500 dark:text-zinc-400" />
-              <span class="text-xs font-medium text-zinc-600 dark:text-zinc-400">Workspace root</span>
+              <FolderOpen class="h-3 w-3 text-zinc-500 dark:text-zinc-400" />
+              <span class="text-xs font-medium text-zinc-600 dark:text-zinc-400">Workspace</span>
             </span>
-            <span class="mb-1 block text-[10px] text-zinc-400 dark:text-zinc-500">
-              Project folder containing <code class="font-mono">BP/</code> — expects
-              <code class="font-mono">BP/scripts/main.js.map</code>
+            <span class="mt-0.5 block text-[10px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+              Open a Regolith folder containing <code class="font-mono">config.json</code>.
             </span>
-            <input
-              type="text"
-              value={workspaceRoot}
-              oninput={(e) => onWorkspaceRootChange(e.currentTarget.value)}
-              placeholder="C:\path\to\project"
-              spellcheck="false"
-              autocomplete="off"
-              class="w-full rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
-            />
+            <div class="mt-2 flex gap-1.5">
+              <button
+                type="button"
+                onclick={onOpenWorkspace}
+                class="flex flex-1 items-center justify-center gap-1 rounded-md border border-zinc-200 px-2 py-1.5 text-[10px] font-medium text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-800 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+              >
+                {#if workspaceLoading}
+                  <LoaderCircle class="h-3 w-3 animate-spin" />
+                {:else}
+                  <FolderOpen class="h-3 w-3" />
+                {/if}
+                {workspaceRoot ? "Change workspace" : "Open workspace"}
+              </button>
+              {#if workspaceRoot}
+                <button
+                  type="button"
+                  onclick={onClearWorkspace}
+                  class="rounded-md border border-zinc-200 px-2 text-[10px] font-medium text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                >
+                  Clear
+                </button>
+              {/if}
+            </div>
+            {#if workspaceInfo}
+              <span class="mt-1.5 block truncate font-mono text-[9px] text-zinc-500 dark:text-zinc-500" title={workspaceInfo.root}>
+                {workspaceInfo.root}
+              </span>
+              <div class="mt-1 grid grid-cols-[auto_1fr] gap-x-2 text-[9px] text-zinc-400 dark:text-zinc-600">
+                <span>BP</span>
+                <span class="truncate font-mono" title={workspaceInfo.behaviorPackUuid ?? "No header UUID"}>{workspaceInfo.behaviorPackUuid ?? "No header UUID"}</span>
+                <span>RP</span>
+                <span class="truncate font-mono" title={workspaceInfo.resourcePackUuid ?? "Not configured"}>{workspaceInfo.resourcePackUuid ?? "Not configured"}</span>
+              </div>
+            {:else if workspaceError}
+              <span class="mt-1.5 block break-words text-[9px] leading-relaxed text-rose-500 dark:text-rose-400">{workspaceError}</span>
+            {/if}
+          </div>
+
+          <div class="rounded-md border border-zinc-200 bg-white/60 p-2.5 dark:border-zinc-800 dark:bg-zinc-950/50">
+            <span class="flex items-center gap-1.5">
+              <MapPin class="h-3 w-3 text-zinc-500 dark:text-zinc-400" />
+              <span class="text-xs font-medium text-zinc-600 dark:text-zinc-400">Source maps</span>
+            </span>
+            <span class="mt-0.5 block text-[10px] leading-relaxed text-zinc-400 dark:text-zinc-500">
+              Uses the open workspace with <code class="font-mono">MOJANG_DIR</code>, or a manual map override.
+            </span>
+            <div class="mt-2 flex gap-1.5">
+              <input
+                type="text"
+                value={sourceMapPath}
+                oninput={(event) => onSourceMapPathChange(event.currentTarget.value)}
+                placeholder="C:\path\to\script.js.map"
+                spellcheck="false"
+                autocomplete="off"
+                aria-label="Manual source map path"
+                class="min-w-0 flex-1 rounded-md border border-zinc-300 bg-white px-2 py-1.5 font-mono text-[10px] text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100"
+              />
+              {#if sourceMapPath}
+                <button
+                  type="button"
+                  onclick={() => onSourceMapPathChange("")}
+                  class="rounded-md border border-zinc-200 px-2 text-[10px] font-medium text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                  title="Clear override and use automatic detection"
+                >
+                  Auto
+                </button>
+              {/if}
+            </div>
             <div
               class="mt-1.5 flex items-center gap-1.5 text-[11px] {sourceMapBadge.text}"
               title={sourceMapBadge.title}
             >
+              <span class="h-1.5 w-1.5 shrink-0 rounded-full {sourceMapBadge.dot} {sourceMapBadge.spin ? 'animate-pulse' : ''}"></span>
               {#if sourceMapBadge.spin}
                 <LoaderCircle class="h-3 w-3 shrink-0 animate-spin" />
               {:else}
@@ -277,13 +348,13 @@
                 <StatusIcon class="h-3 w-3 shrink-0" />
               {/if}
               <span class="truncate">{sourceMapBadge.label}</span>
-              {#if sourceMapStatus.state === "loaded"}
-                <span class="truncate text-zinc-400 dark:text-zinc-500" title={sourceMapStatus.mapPath}>
-                  {sourceMapStatus.mapPath}
-                </span>
-              {/if}
             </div>
-          </label>
+            {#if sourceMapStatus.state === "loaded"}
+              <span class="mt-1 block truncate font-mono text-[9px] text-zinc-400 dark:text-zinc-600" title={sourceMapStatus.mapPath}>
+                {sourceMapStatus.mapPath}
+              </span>
+            {/if}
+          </div>
         </div>
       {/if}
 

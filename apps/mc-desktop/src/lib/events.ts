@@ -1,7 +1,20 @@
 import type { McEvent, SourceFrame } from "./types.js";
 
 export function logLevelName(level: number): string {
-  return level === 0 ? "LOG" : level === 1 ? "WARN" : "ERROR";
+  switch (level) {
+    case 0:
+      return "VERBOSE";
+    case 1:
+      return "LOG";
+    case 2:
+      return "WARN";
+    case 3:
+      return "ERROR";
+    case 4:
+      return "STOP";
+    default:
+      return `LEVEL ${level}`;
+  }
 }
 
 // ── Source-frame helpers ─────────────────────────────────────────────
